@@ -91,6 +91,8 @@ target/
 .python-version
 
 .env
+
+.tensorenv/
 .venv
 .idea
 .vscode
