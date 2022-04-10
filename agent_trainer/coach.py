@@ -27,6 +27,7 @@ actions = env.action_space.n
 
 # Build environment
 state = env.reset()
+#region Debug plot
 # while True: 
 #   action = env.action_space.sample()
 #   n_state, reward, done, info = env.step(action)
@@ -38,6 +39,7 @@ state = env.reset()
 # plt.cla()
 # env.render_all()
 # plt.show()
+#endregion
 
 def build_model(states, actions):
     model = tf.keras.Sequential()
