@@ -1,10 +1,7 @@
-# !pip install tensorflow-gpu==1.15.0 tensorflow==1.15.0 stable-baselines gym-anytrading gym
-
 # Gym stuff
 import gym
-import random
 import gym_anytrading
-from pkg_resources import add_activation_listener
+import random
 
 import tensorflow as tf
 
@@ -12,8 +9,6 @@ from tensorflow.keras.layers import Dense, Flatten, LSTM
 from tensorflow.keras.optimizers import Adam
 
 # Processing libraries
-import numpy as np
-import pandas as pd
 from matplotlib import pyplot as plt
 from data_manager import importer
 
@@ -25,14 +20,14 @@ from rl.memory import SequentialMemory
 df = importer.get_df("user_data\\data\\binance\\BTC_USDT-1m.json")
 
 # Make environment
-env = gym.make('stocks-v0', df=df, frame_bound=(5,100), window_size=5)
+env = gym.make('crypto-v0', df=df, frame_bound=(5,100), window_size=5)
 states = env.observation_space.shape[0]
 actions = env.action_space.n
 
 
 # Build environment
 state = env.reset()
-# while True:
+# while True: 
 #   action = env.action_space.sample()
 #   n_state, reward, done, info = env.step(action)
 #   if done:
@@ -67,4 +62,4 @@ def build_agent(model, actions):
   
 dqn = build_agent(model, actions)
 dqn.compile(Adam(learning_rate=1e-3), metrics=['mae'])
-dqn.fit(env, nb_steps=50000, visualize=True, verbose=1)
+dqn.fit(env, nb_steps=50000, visualize=False, verbose=1)
