@@ -6,7 +6,7 @@ import numpy as np
 def get_df(path):
   df = pd.read_json(path, orient= 'values' )
   #df = pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close", "Volume"])
-  df.columns = ["Date", "Open", "High", "Low", "Close", "Volume"]
+  df.columns = ["Date", "Open", "High", "Low", "close", "Volume"]
   
 
   df['Date'] = pd.to_datetime(df['Date'],unit='ms')
