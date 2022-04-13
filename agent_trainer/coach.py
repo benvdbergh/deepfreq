@@ -20,8 +20,9 @@ from rl.memory import SequentialMemory
 df = importer.get_df("user_data\\data\\binance\\BTC_USDT-1m.json")
 
 # Make environment
-env = gym.make('crypto-v0', df=df, frame_bound=(5,100), window_size=5)
+env = gym.make('crypto-v0', df=df, frame_bound=(5,863000), window_size=5)
 states = env.observation_space.shape[0]
+state_size= env.observation_space.shape[1]
 actions = env.action_space.n
 
 
@@ -43,10 +44,10 @@ state = env.reset()
 
 def build_model(states, actions):
     model = tf.keras.Sequential()
-    model.add(Flatten(input_shape=(1,states,actions)))
+    model.add(Flatten(input_shape=(1,states,state_size)))
     # model.add(LSTM(5, activation='relu',input_shape=(1,states)))
-    model.add(Dense(32, activation='relu'))
-    model.add(Dense(32, activation='relu'))
+    #model.add(Dense(32, activation='relu'))
+    model.add(Dense(64, activation='relu'))
     model.add(Dense(actions, activation='linear'))
     return model
 
@@ -64,4 +65,4 @@ def build_agent(model, actions):
   
 dqn = build_agent(model, actions)
 dqn.compile(Adam(learning_rate=1e-3), metrics=['mae'])
-dqn.fit(env, nb_steps=50000, visualize=False, verbose=1)
+dqn.fit(env, nb_steps=50000, visualize=True, verbose=1, log_interval=10000)

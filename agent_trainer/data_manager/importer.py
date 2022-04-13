@@ -6,13 +6,14 @@ import numpy as np
 def get_df(path):
   df = pd.read_json(path, orient= 'values' )
   #df = pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close", "Volume"])
-  df.columns = ["Date", "Open", "High", "Low", "close", "Volume"]
+  df.columns = ["date", "open", "high", "low", "close", "volume"]
   
 
-  df['Date'] = pd.to_datetime(df['Date'],unit='ms')
-  df.set_index('Date', inplace=True)
+  df['date'] = pd.to_datetime(df['date'],unit='ms')
+  df.set_index('date', inplace=True)
   
   print(df.head())
+  print(df.shape)
   
   # # check if directory is empty
   # if not os.path.isdir() or len(os.listdir(path)) == 0:
