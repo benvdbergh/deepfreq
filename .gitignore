@@ -95,6 +95,7 @@ target/
 .env
 
 .tensorenv/
+.freqenv/*
 .venv
 .idea
 .vscode
