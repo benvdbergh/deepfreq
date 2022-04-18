@@ -12,9 +12,6 @@ def get_df(path):
   df['date'] = pd.to_datetime(df['date'],unit='ms')
   df.set_index('date', inplace=True)
   
-  print(df.head())
-  print(df.shape)
-  
   # # check if directory is empty
   # if not os.path.isdir() or len(os.listdir(path)) == 0:
   #   print("ERROR Directory does not exist or is empty")
