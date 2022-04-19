@@ -1,0 +1,3 @@
+[submodule "gym-anytrading"]
+	path = gym-anytrading
+	url = https://github.com/benvdbergh/gym-anytrading.git
