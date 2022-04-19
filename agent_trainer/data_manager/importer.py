@@ -25,4 +25,5 @@ def get_df(path):
   #         print(f)
   return df
 
-# get_df("C:\\Users\\vandenbb\\source\\vscode\\deepfreq\\user_data\\data\\binance\\BTC_USDT-1m.json")
+if __name__ == "__main__":
+  get_df("C:\\Users\\vandenbb\\source\\vscode\\deepfreq\\user_data\\data\\binance\\BTC_USDT-1m.json")
