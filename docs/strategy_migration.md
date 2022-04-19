@@ -9,6 +9,8 @@ You can use the quick summary as checklist. Please refer to the detailed section
 
 ## Quick summary / migration checklist
 
+Note : `forcesell`, `forcebuy`, `emergencysell` are changed to `force_exit`, `force_enter`, `emergency_exit` respectively.
+
 * Strategy methods:
   * [`populate_buy_trend()` -> `populate_entry_trend()`](#populate_buy_trend)
   * [`populate_sell_trend()` -> `populate_exit_trend()`](#populate_sell_trend)
@@ -27,7 +29,7 @@ You can use the quick summary as checklist. Please refer to the detailed section
   * [New column `enter_short` and corresponding new column `exit_short`](#populate_sell_trend)
 * trade-object now has the following new properties:
   * `is_short`
-  * `enter_side`
+  * `entry_side`
   * `exit_side`
   * `trade_direction`
   * renamed: `sell_reason` -> `exit_reason`
@@ -61,8 +63,12 @@ You can use the quick summary as checklist. Please refer to the detailed section
     * `sell` -> `exit`
     * `sell_fill` -> `exit_fill`
     * `sell_cancel` -> `exit_cancel`
-
-
+  * Strategy/config settings:
+    * `use_sell_signal` -> `use_exit_signal`
+    * `sell_profit_only` -> `exit_profit_only`
+    * `sell_profit_offset` -> `exit_profit_offset`
+    * `ignore_roi_if_buy_signal` -> `ignore_roi_if_entry_signal`
+    * `forcebuy_enable` -> `force_entry_enable`
 
 ## Extensive explanation
 
@@ -139,6 +145,9 @@ Please refer to the [Strategy documentation](strategy-customization.md#exit-sign
 
 ### `custom_sell`
 
+`custom_sell` has been renamed to `custom_exit`.
+It's now also being called for every iteration, independent of current profit and `exit_profit_only` settings.
+
 ``` python hl_lines="2"
 class AwesomeStrategy(IStrategy):
     def custom_sell(self, pair: str, trade: 'Trade', current_time: 'datetime', current_rate: float,
@@ -174,11 +183,11 @@ class AwesomeStrategy(IStrategy):
 
 ``` python hl_lines="2 6"
 class AwesomeStrategy(IStrategy):
-    def check_entry_timeout(self, pair: str, trade: 'Trade', order: dict, 
+    def check_entry_timeout(self, pair: str, trade: 'Trade', order: 'Order', 
                             current_time: datetime, **kwargs) -> bool:
         return False
 
-    def check_exit_timeout(self, pair: str, trade: 'Trade', order: dict, 
+    def check_exit_timeout(self, pair: str, trade: 'Trade', order: 'Order', 
                             current_time: datetime, **kwargs) -> bool:
         return False 
 ```
@@ -331,6 +340,7 @@ After:
 #### `order_types`
 
 `order_types` have changed all wordings from `buy` to `entry` - and `sell` to `exit`.
+And two words are joined with `_`. 
 
 ``` python hl_lines="2-6"
     order_types = {
@@ -351,13 +361,38 @@ After:
     order_types = {
         "entry": "limit",
         "exit": "limit",
-        "emergencyexit": "market",
-        "forceexit": "market",
-        "forceentry": "market",
+        "emergency_exit": "market",
+        "force_exit": "market",
+        "force_entry": "market",
         "stoploss": "market",
         "stoploss_on_exchange": false,
         "stoploss_on_exchange_interval": 60
     }
+```
+
+#### Strategy level settings
+
+* `use_sell_signal` -> `use_exit_signal`
+* `sell_profit_only` -> `exit_profit_only`
+* `sell_profit_offset` -> `exit_profit_offset`
+* `ignore_roi_if_buy_signal` -> `ignore_roi_if_entry_signal`
+
+``` python hl_lines="2-5"
+    # These values can be overridden in the config.
+    use_sell_signal = True
+    sell_profit_only = True
+    sell_profit_offset: 0.01
+    ignore_roi_if_buy_signal = False
+```
+
+After:
+
+``` python hl_lines="2-5"
+    # These values can be overridden in the config.
+    use_exit_signal = True
+    exit_profit_only = True
+    exit_profit_offset: 0.01
+    ignore_roi_if_entry_signal = False
 ```
 
 #### `unfilledtimeout`

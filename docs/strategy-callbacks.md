@@ -84,16 +84,17 @@ Freqtrade will fall back to the `proposed_stake` value should your code raise an
 
 Called for open trade every throttling iteration (roughly every 5 seconds) until a trade is closed.
 
-Allows to define custom exit signals, indicating that specified position should be sold. This is very useful when we need to customize sell conditions for each individual trade, or if you need trade data to make an exit decision.
+Allows to define custom exit signals, indicating that specified position should be sold. This is very useful when we need to customize exit conditions for each individual trade, or if you need trade data to make an exit decision.
 
 For example you could implement a 1:2 risk-reward ROI with `custom_exit()`.
 
-Using custom_exit() signals in place of stoploss though *is not recommended*. It is a inferior method to using `custom_stoploss()` in this regard - which also allows you to keep the stoploss on exchange.
+Using `custom_exit()` signals in place of stoploss though *is not recommended*. It is a inferior method to using `custom_stoploss()` in this regard - which also allows you to keep the stoploss on exchange.
 
 !!! Note
-    Returning a (none-empty) `string` or `True` from this method is equal to setting sell signal on a candle at specified time. This method is not called when sell signal is set already, or if sell signals are disabled (`use_sell_signal=False` or `sell_profit_only=True` while profit is below `sell_profit_offset`). `string` max length is 64 characters. Exceeding this limit will cause the message to be truncated to 64 characters.
+    Returning a (none-empty) `string` or `True` from this method is equal to setting exit signal on a candle at specified time. This method is not called when exit signal is set already, or if exit signals are disabled (`use_exit_signal=False`). `string` max length is 64 characters. Exceeding this limit will cause the message to be truncated to 64 characters.
+    `custom_exit()` will ignore `exit_profit_only`, and will always be called unless `use_exit_signal=False`, even if there is a new enter signal.
 
-An example of how we can use different indicators depending on the current profit and also sell trades that were open longer than one day:
+An example of how we can use different indicators depending on the current profit and also exit trades that were open longer than one day:
 
 ``` python
 class AwesomeStrategy(IStrategy):
@@ -417,7 +418,7 @@ The function must return either `True` (cancel order) or `False` (keep order ali
 
 ``` python
 from datetime import datetime, timedelta
-from freqtrade.persistence import Trade
+from freqtrade.persistence import Trade, Order
 
 class AwesomeStrategy(IStrategy):
 
@@ -429,7 +430,7 @@ class AwesomeStrategy(IStrategy):
         'exit': 60 * 25
     }
 
-    def check_entry_timeout(self, pair: str, trade: 'Trade', order: dict, 
+    def check_entry_timeout(self, pair: str, trade: 'Trade', order: 'Order', 
                             current_time: datetime, **kwargs) -> bool:
         if trade.open_rate > 100 and trade.open_date_utc < current_time - timedelta(minutes=5):
             return True
@@ -440,7 +441,7 @@ class AwesomeStrategy(IStrategy):
         return False
 
 
-    def check_exit_timeout(self, pair: str, trade: Trade, order: dict,
+    def check_exit_timeout(self, pair: str, trade: Trade, order: 'Order',
                            current_time: datetime, **kwargs) -> bool:
         if trade.open_rate > 100 and trade.open_date_utc < current_time - timedelta(minutes=5):
             return True
@@ -458,7 +459,7 @@ class AwesomeStrategy(IStrategy):
 
 ``` python
 from datetime import datetime
-from freqtrade.persistence import Trade
+from freqtrade.persistence import Trade, Order
 
 class AwesomeStrategy(IStrategy):
 
@@ -470,22 +471,22 @@ class AwesomeStrategy(IStrategy):
         'exit': 60 * 25
     }
 
-    def check_entry_timeout(self, pair: str, trade: Trade, order: dict,
+    def check_entry_timeout(self, pair: str, trade: 'Trade', order: 'Order',
                             current_time: datetime, **kwargs) -> bool:
         ob = self.dp.orderbook(pair, 1)
         current_price = ob['bids'][0][0]
         # Cancel buy order if price is more than 2% above the order.
-        if current_price > order['price'] * 1.02:
+        if current_price > order.price * 1.02:
             return True
         return False
 
 
-    def check_exit_timeout(self, pair: str, trade: Trade, order: dict,
+    def check_exit_timeout(self, pair: str, trade: 'Trade', order: 'Order',
                            current_time: datetime, **kwargs) -> bool:
         ob = self.dp.orderbook(pair, 1)
         current_price = ob['asks'][0][0]
         # Cancel sell order if price is more than 2% below the order.
-        if current_price < order['price'] * 0.98:
+        if current_price < order.price * 0.98:
             return True
         return False
 ```
@@ -665,7 +666,7 @@ class DigDeeperStrategy(IStrategy):
         if last_candle['close'] < previous_candle['close']:
             return None
 
-        filled_entries = trade.select_filled_orders(trade.enter_side)
+        filled_entries = trade.select_filled_orders(trade.entry_side)
         count_of_entries = trade.nr_of_successful_entries
         # Allow up to 3 additional increasingly larger buys (4 in total)
         # Initial buy is 1x

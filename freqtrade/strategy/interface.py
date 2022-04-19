@@ -90,10 +90,10 @@ class IStrategy(ABC, HyperStrategyMixin):
     # run "populate_indicators" only for new candle
     process_only_new_candles: bool = False
 
-    use_sell_signal: bool
-    sell_profit_only: bool
-    sell_profit_offset: float
-    ignore_roi_if_buy_signal: bool
+    use_exit_signal: bool
+    exit_profit_only: bool
+    exit_profit_offset: float
+    ignore_roi_if_entry_signal: bool
 
     # Position adjustment is disabled by default
     position_adjustment_enable: bool = False
@@ -206,18 +206,18 @@ class IStrategy(ABC, HyperStrategyMixin):
         """
         pass
 
-    def check_buy_timeout(self, pair: str, trade: Trade, order: dict,
+    def check_buy_timeout(self, pair: str, trade: Trade, order: Order,
                           current_time: datetime, **kwargs) -> bool:
         """
         DEPRECATED: Please use `check_entry_timeout` instead.
         """
         return False
 
-    def check_entry_timeout(self, pair: str, trade: Trade, order: dict,
+    def check_entry_timeout(self, pair: str, trade: Trade, order: Order,
                             current_time: datetime, **kwargs) -> bool:
         """
         Check entry timeout function callback.
-        This method can be used to override the enter-timeout.
+        This method can be used to override the entry-timeout.
         It is called whenever a limit entry order has been created,
         and is not yet fully filled.
         Configuration options in `unfilledtimeout` will be verified before this,
@@ -225,8 +225,8 @@ class IStrategy(ABC, HyperStrategyMixin):
 
         When not implemented by a strategy, this simply returns False.
         :param pair: Pair the trade is for
-        :param trade: trade object.
-        :param order: Order dictionary as returned from CCXT.
+        :param trade: Trade object.
+        :param order: Order object.
         :param current_time: datetime object, containing the current datetime
         :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
         :return bool: When True is returned, then the entry order is cancelled.
@@ -234,30 +234,30 @@ class IStrategy(ABC, HyperStrategyMixin):
         return self.check_buy_timeout(
             pair=pair, trade=trade, order=order, current_time=current_time)
 
-    def check_sell_timeout(self, pair: str, trade: Trade, order: dict,
+    def check_sell_timeout(self, pair: str, trade: Trade, order: Order,
                            current_time: datetime, **kwargs) -> bool:
         """
         DEPRECATED: Please use `check_exit_timeout` instead.
         """
         return False
 
-    def check_exit_timeout(self, pair: str, trade: Trade, order: dict,
+    def check_exit_timeout(self, pair: str, trade: Trade, order: Order,
                            current_time: datetime, **kwargs) -> bool:
         """
-        Check sell timeout function callback.
+        Check exit timeout function callback.
         This method can be used to override the exit-timeout.
-        It is called whenever a (long) limit sell order or (short) limit buy
-        has been created, and is not yet fully filled.
+        It is called whenever a limit exit order has been created,
+        and is not yet fully filled.
         Configuration options in `unfilledtimeout` will be verified before this,
         so ensure to set these timeouts high enough.
 
         When not implemented by a strategy, this simply returns False.
         :param pair: Pair the trade is for
-        :param trade: trade object.
-        :param order: Order dictionary as returned from CCXT.
+        :param trade: Trade object.
+        :param order: Order object
         :param current_time: datetime object, containing the current datetime
         :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
-        :return bool: When True is returned, then the (long)sell/(short)buy-order is cancelled.
+        :return bool: When True is returned, then the exit-order is cancelled.
         """
         return self.check_sell_timeout(
             pair=pair, trade=trade, order=order, current_time=current_time)
@@ -871,7 +871,7 @@ class IStrategy(ABC, HyperStrategyMixin):
         current_profit = trade.calc_profit_ratio(current_rate)
 
         # if enter signal and ignore_roi is set, we don't need to evaluate min_roi.
-        roi_reached = (not (enter and self.ignore_roi_if_buy_signal)
+        roi_reached = (not (enter and self.ignore_roi_if_entry_signal)
                        and self.min_roi_reached(trade=trade, current_profit=current_profit,
                                                 current_time=current_time))
 
@@ -881,14 +881,10 @@ class IStrategy(ABC, HyperStrategyMixin):
         current_rate = rate
         current_profit = trade.calc_profit_ratio(current_rate)
 
-        if (self.sell_profit_only and current_profit <= self.sell_profit_offset):
-            # sell_profit_only and profit doesn't reach the offset - ignore sell signal
-            pass
-        elif self.use_sell_signal and not enter:
-            if exit_:
+        if self.use_exit_signal:
+            if exit_ and not enter:
                 exit_signal = ExitType.EXIT_SIGNAL
             else:
-                trade_type = "exit_short" if trade.is_short else "sell"
                 custom_reason = strategy_safe_wrapper(self.custom_exit, default_retval=False)(
                     pair=trade.pair, trade=trade, current_time=current_time,
                     current_rate=current_rate, current_profit=current_profit)
@@ -896,13 +892,17 @@ class IStrategy(ABC, HyperStrategyMixin):
                     exit_signal = ExitType.CUSTOM_EXIT
                     if isinstance(custom_reason, str):
                         if len(custom_reason) > CUSTOM_EXIT_MAX_LENGTH:
-                            logger.warning(f'Custom {trade_type} reason returned from '
+                            logger.warning(f'Custom exit reason returned from '
                                            f'custom_exit is too long and was trimmed'
                                            f'to {CUSTOM_EXIT_MAX_LENGTH} characters.')
                             custom_reason = custom_reason[:CUSTOM_EXIT_MAX_LENGTH]
                     else:
                         custom_reason = None
-            if exit_signal in (ExitType.CUSTOM_EXIT, ExitType.EXIT_SIGNAL):
+            if (
+                exit_signal == ExitType.CUSTOM_EXIT
+                or (exit_signal == ExitType.EXIT_SIGNAL
+                    and (not self.exit_profit_only or current_profit > self.exit_profit_offset))
+            ):
                 logger.debug(f"{trade.pair} - Sell signal received. "
                              f"exit_type=ExitType.{exit_signal.name}" +
                              (f", custom_reason={custom_reason}" if custom_reason else ""))
@@ -1044,7 +1044,7 @@ class IStrategy(ABC, HyperStrategyMixin):
         FT Internal method.
         Check if timeout is active, and if the order is still open and timed out
         """
-        side = 'entry' if order.ft_order_side == trade.enter_side else 'exit'
+        side = 'entry' if order.ft_order_side == trade.entry_side else 'exit'
 
         timeout = self.config.get('unfilledtimeout', {}).get(side)
         if timeout is not None:
