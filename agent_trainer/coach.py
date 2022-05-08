@@ -1,3 +1,4 @@
+#region IMPORTS
 # Gym stuff
 import gym
 import gym_anytrading
@@ -15,12 +16,13 @@ from data_manager import importer
 from rl.agents import DQNAgent
 from rl.policy import BoltzmannQPolicy
 from rl.memory import SequentialMemory
+#endregion
 
 # Initialize data
 df = importer.get_df("user_data\\data\\binance\\BTC_USDT-1m.json")
 
 # Make environment
-env = gym.make('crypto-v0', df=df, frame_bound=(10,df.shape[0]), window_size=10)
+env = gym.make('crypto-v0', df=df, frame_bound=(11,df.shape[0]), window_size=10)
 num_timesteps = env.observation_space.shape[0]
 state_size= env.observation_space.shape[1]
 actions = env.action_space.n
@@ -52,4 +54,4 @@ def build_agent(model, actions):
   
 dqn = build_agent(model, actions)
 dqn.compile(Adam(learning_rate=1e-3), metrics=['mae'])
-dqn.fit(env, nb_steps=50000, visualize=False, verbose=1, log_interval=10000)
+dqn.fit(env, nb_steps=50000, visualize=False, nb_max_episode_steps=2000, verbose=1, log_interval=2000)
