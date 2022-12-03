@@ -5,6 +5,7 @@
     "tradable_balance_ratio": 0.99,
     "fiat_display_currency": "USD",
     "amount_reserve_percent": 0.05,
+    "available_capital": 1000,
     "amend_last_stake_amount": false,
     "last_stake_amount_min_ratio": 0.5,
     "dry_run": true,
@@ -63,8 +64,8 @@
         "stoploss_on_exchange_limit_ratio": 0.99
     },
     "order_time_in_force": {
-        "entry": "gtc",
-        "exit": "gtc"
+        "entry": "GTC",
+        "exit": "GTC"
     },
     "pairlists": [
         {"method": "StaticPairList"},
@@ -92,6 +93,7 @@
         "secret": "your_exchange_secret",
         "password": "",
         "log_responses": false,
+        // "unknown_fee_rate": 1,
         "ccxt_config": {},
         "ccxt_async_config": {},
         "pair_whitelist": [
@@ -155,7 +157,8 @@
             "entry_cancel": "on",
             "exit_cancel": "on",
             "protection_trigger": "off",
-            "protection_trigger_global": "on"
+            "protection_trigger_global": "on",
+            "show_candle": "off"
         },
         "reload": true,
         "balance_dust_level": 0.01
@@ -169,7 +172,24 @@
         "jwt_secret_key": "somethingrandom",
         "CORS_origins": [],
         "username": "freqtrader",
-        "password": "SuperSecurePassword"
+        "password": "SuperSecurePassword",
+        "ws_token": "secret_ws_t0ken."
+    },
+    "external_message_consumer": {
+        "enabled": false,
+        "producers": [
+          {
+            "name": "default",
+            "host": "127.0.0.2",
+            "port": 8080,
+            "ws_token": "secret_ws_t0ken."
+          }
+        ],
+        "wait_timeout": 300,
+        "ping_timeout": 10,
+        "sleep_time": 10,
+        "remove_entry_exit_signals": false,
+        "message_size_limit": 8
     },
     "bot_name": "freqtrade",
     "db_url": "sqlite:///tradesv3.sqlite",
@@ -182,7 +202,9 @@
     "disable_dataframe_checks": false,
     "strategy": "SampleStrategy",
     "strategy_path": "user_data/strategies/",
+    "recursive_strategy_search": false,
     "add_config_files": [],
+    "reduce_df_footprint": false,
     "dataformat_ohlcv": "json",
     "dataformat_trades": "jsongz"
 }

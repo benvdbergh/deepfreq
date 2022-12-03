@@ -6,11 +6,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import ccxt
 from pandas import DataFrame
 
+from freqtrade.constants import BuySell
 from freqtrade.enums import MarginMode, TradingMode
 from freqtrade.exceptions import (DDosProtection, InsufficientFundsError, InvalidOrderException,
                                   OperationalException, TemporaryError)
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.common import retrier
+from freqtrade.exchange.types import Tickers
 
 
 logger = logging.getLogger(__name__)
@@ -22,6 +24,7 @@ class Kraken(Exchange):
     _ft_has: Dict = {
         "stoploss_on_exchange": True,
         "ohlcv_candle_limit": 720,
+        "ohlcv_has_history": False,
         "trades_pagination": "id",
         "trades_pagination_arg": "since",
         "mark_ohlcv_timeframe": "4h",
@@ -43,7 +46,7 @@ class Kraken(Exchange):
         return (parent_check and
                 market.get('darkpool', False) is False)
 
-    def get_tickers(self, symbols: List[str] = None, cached: bool = False) -> Dict:
+    def get_tickers(self, symbols: Optional[List[str]] = None, cached: bool = False) -> Tickers:
         # Only fetch tickers for current stake currency
         # Otherwise the request for kraken becomes too large.
         symbols = list(self.get_markets(quote_currencies=[self._config['stake_currency']]))
@@ -95,7 +98,7 @@ class Kraken(Exchange):
 
     @retrier(retries=0)
     def stoploss(self, pair: str, amount: float, stop_price: float,
-                 order_types: Dict, side: str, leverage: float) -> Dict:
+                 order_types: Dict, side: BuySell, leverage: float) -> Dict:
         """
         Creates a stoploss market order.
         Stoploss market orders is the only stoploss type supported by kraken.
@@ -165,12 +168,14 @@ class Kraken(Exchange):
 
     def _get_params(
         self,
+        side: BuySell,
         ordertype: str,
         leverage: float,
         reduceOnly: bool,
-        time_in_force: str = 'gtc'
+        time_in_force: str = 'GTC'
     ) -> Dict:
         params = super()._get_params(
+            side=side,
             ordertype=ordertype,
             leverage=leverage,
             reduceOnly=reduceOnly,
@@ -213,3 +218,19 @@ class Kraken(Exchange):
             fees = sum(df['open_fund'] * df['open_mark'] * amount * time_in_ratio)
 
         return fees if is_short else -fees
+
+    def _trades_contracts_to_amount(self, trades: List) -> List:
+        """
+        Fix "last" id issue for kraken data downloads
+        This whole override can probably be removed once the following
+        issue is closed in ccxt: https://github.com/ccxt/ccxt/issues/15827
+        """
+        super()._trades_contracts_to_amount(trades)
+        if (
+            len(trades) > 0
+            and isinstance(trades[-1].get('info'), list)
+            and len(trades[-1].get('info', [])) > 7
+        ):
+
+            trades[-1]['id'] = trades[-1].get('info', [])[-1]
+        return trades

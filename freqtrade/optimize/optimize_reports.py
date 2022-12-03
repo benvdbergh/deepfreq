@@ -4,35 +4,35 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
-from numpy import int64
 from pandas import DataFrame, to_datetime
 from tabulate import tabulate
 
-from freqtrade.constants import DATETIME_PRINT_FORMAT, LAST_BT_RESULT_FN, UNLIMITED_STAKE_AMOUNT
-from freqtrade.data.btanalysis import (calculate_csum, calculate_market_change,
-                                       calculate_max_drawdown)
-from freqtrade.misc import (decimals_per_coin, file_dump_json, get_backtest_metadata_filename,
-                            round_coin_value)
+from freqtrade.constants import (DATETIME_PRINT_FORMAT, LAST_BT_RESULT_FN, UNLIMITED_STAKE_AMOUNT,
+                                 Config)
+from freqtrade.data.metrics import (calculate_cagr, calculate_csum, calculate_market_change,
+                                    calculate_max_drawdown)
+from freqtrade.misc import decimals_per_coin, file_dump_joblib, file_dump_json, round_coin_value
+from freqtrade.optimize.backtest_caching import get_backtest_metadata_filename
 
 
 logger = logging.getLogger(__name__)
 
 
-def store_backtest_stats(recordfilename: Path, stats: Dict[str, DataFrame]) -> None:
+def store_backtest_stats(
+        recordfilename: Path, stats: Dict[str, DataFrame], dtappendix: str) -> None:
     """
     Stores backtest results
     :param recordfilename: Path object, which can either be a filename or a directory.
         Filenames will be appended with a timestamp right before the suffix
         while for directories, <directory>/backtest-result-<datetime>.json will be used as filename
     :param stats: Dataframe containing the backtesting statistics
+    :param dtappendix: Datetime to use for the filename
     """
     if recordfilename.is_dir():
-        filename = (recordfilename /
-                    f'backtest-result-{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.json')
+        filename = (recordfilename / f'backtest-result-{dtappendix}.json')
     else:
         filename = Path.joinpath(
-            recordfilename.parent,
-            f'{recordfilename.stem}-{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}'
+            recordfilename.parent, f'{recordfilename.stem}-{dtappendix}'
         ).with_suffix(recordfilename.suffix)
 
     # Store metadata separately.
@@ -45,6 +45,29 @@ def store_backtest_stats(recordfilename: Path, stats: Dict[str, DataFrame]) -> N
     file_dump_json(latest_filename, {'latest_backtest': str(filename.name)})
 
 
+def store_backtest_signal_candles(
+        recordfilename: Path, candles: Dict[str, Dict], dtappendix: str) -> Path:
+    """
+    Stores backtest trade signal candles
+    :param recordfilename: Path object, which can either be a filename or a directory.
+        Filenames will be appended with a timestamp right before the suffix
+        while for directories, <directory>/backtest-result-<datetime>_signals.pkl will be used
+        as filename
+    :param stats: Dict containing the backtesting signal candles
+    :param dtappendix: Datetime to use for the filename
+    """
+    if recordfilename.is_dir():
+        filename = (recordfilename / f'backtest-result-{dtappendix}_signals.pkl')
+    else:
+        filename = Path.joinpath(
+            recordfilename.parent, f'{recordfilename.stem}-{dtappendix}_signals.pkl'
+        )
+
+    file_dump_joblib(filename, candles)
+
+    return filename
+
+
 def _get_line_floatfmt(stake_currency: str) -> List[str]:
     """
     Generate floatformat (goes in line with _generate_result_line())
@@ -53,7 +76,8 @@ def _get_line_floatfmt(stake_currency: str) -> List[str]:
             '.2f', 'd', 's', 's']
 
 
-def _get_line_header(first_column: str, stake_currency: str, direction: str = 'Buys') -> List[str]:
+def _get_line_header(first_column: str, stake_currency: str,
+                     direction: str = 'Entries') -> List[str]:
     """
     Generate header lines (goes in line with _generate_result_line())
     """
@@ -62,7 +86,7 @@ def _get_line_header(first_column: str, stake_currency: str, direction: str = 'B
             'Win  Draw  Loss  Win%']
 
 
-def _generate_wins_draws_losses(wins, draws, losses):
+def generate_wins_draws_losses(wins, draws, losses):
     if wins > 0 and losses == 0:
         wl_ratio = '100'
     elif wins == 0:
@@ -149,7 +173,7 @@ def generate_tag_metrics(tag_type: str,
     tabular_data = []
 
     if tag_type in results.columns:
-        for tag, count in results[tag_type].value_counts().iteritems():
+        for tag, count in results[tag_type].value_counts().items():
             result = results[results[tag_type] == tag]
             if skip_nan and result['profit_abs'].isnull().all():
                 continue
@@ -175,7 +199,7 @@ def generate_exit_reason_stats(max_open_trades: int, results: DataFrame) -> List
     """
     tabular_data = []
 
-    for reason, count in results['exit_reason'].value_counts().iteritems():
+    for reason, count in results['exit_reason'].value_counts().items():
         result = results.loc[results['exit_reason'] == reason]
 
         profit_mean = result['profit_ratio'].mean()
@@ -241,7 +265,7 @@ def generate_edge_table(results: dict) -> str:
 
     # Ignore type as floatfmt does allow tuples but mypy does not know that
     return tabulate(tabular_data, headers=headers,
-                    floatfmt=floatfmt, tablefmt="orgtbl", stralign="right")  # type: ignore
+                    floatfmt=floatfmt, tablefmt="orgtbl", stralign="right")
 
 
 def _get_resample_from_period(period: str) -> str:
@@ -337,7 +361,7 @@ def generate_daily_stats(results: DataFrame) -> Dict[str, Any]:
     winning_days = sum(daily_profit > 0)
     draw_days = sum(daily_profit == 0)
     losing_days = sum(daily_profit < 0)
-    daily_profit_list = [(str(idx.date()), val) for idx, val in daily_profit.iteritems()]
+    daily_profit_list = [(str(idx.date()), val) for idx, val in daily_profit.items()]
 
     return {
         'backtest_best_day': best_rel,
@@ -384,19 +408,19 @@ def generate_strategy_stats(pairlist: List[str],
 
     exit_reason_stats = generate_exit_reason_stats(max_open_trades=max_open_trades,
                                                    results=results)
-    left_open_results = generate_pair_metrics(pairlist, stake_currency=stake_currency,
-                                              starting_balance=start_balance,
-                                              results=results.loc[results['is_open']],
-                                              skip_nan=True)
+    left_open_results = generate_pair_metrics(
+        pairlist, stake_currency=stake_currency, starting_balance=start_balance,
+        results=results.loc[results['exit_reason'] == 'force_exit'], skip_nan=True)
+
     daily_stats = generate_daily_stats(results)
     trade_stats = generate_trading_stats(results)
     best_pair = max([pair for pair in pair_results if pair['key'] != 'TOTAL'],
                     key=lambda x: x['profit_sum']) if len(pair_results) > 1 else None
     worst_pair = min([pair for pair in pair_results if pair['key'] != 'TOTAL'],
                      key=lambda x: x['profit_sum']) if len(pair_results) > 1 else None
-    if not results.empty:
-        results['open_timestamp'] = results['open_date'].view(int64) // 1e6
-        results['close_timestamp'] = results['close_date'].view(int64) // 1e6
+    winning_profit = results.loc[results['profit_abs'] > 0, 'profit_abs'].sum()
+    losing_profit = results.loc[results['profit_abs'] < 0, 'profit_abs'].sum()
+    profit_factor = winning_profit / abs(losing_profit) if losing_profit else 0.0
 
     backtest_days = (max_date - min_date).days or 1
     strat_stats = {
@@ -423,6 +447,8 @@ def generate_strategy_stats(pairlist: List[str],
         'profit_total_abs': results['profit_abs'].sum(),
         'profit_total_long_abs': results.loc[~results['is_short'], 'profit_abs'].sum(),
         'profit_total_short_abs': results.loc[results['is_short'], 'profit_abs'].sum(),
+        'cagr': calculate_cagr(backtest_days, start_balance, content['final_balance']),
+        'profit_factor': profit_factor,
         'backtest_start': min_date.strftime(DATETIME_PRINT_FORMAT),
         'backtest_start_ts': int(min_date.timestamp() * 1000),
         'backtest_end': max_date.strftime(DATETIME_PRINT_FORMAT),
@@ -444,6 +470,9 @@ def generate_strategy_stats(pairlist: List[str],
         'rejected_signals': content['rejected_signals'],
         'timedout_entry_orders': content['timedout_entry_orders'],
         'timedout_exit_orders': content['timedout_exit_orders'],
+        'canceled_trade_entries': content['canceled_trade_entries'],
+        'canceled_entry_orders': content['canceled_entry_orders'],
+        'replaced_entry_orders': content['replaced_entry_orders'],
         'max_open_trades': max_open_trades,
         'max_open_trades_setting': (config['max_open_trades']
                                     if config['max_open_trades'] != float('inf') else -1),
@@ -474,9 +503,14 @@ def generate_strategy_stats(pairlist: List[str],
         (drawdown_abs, drawdown_start, drawdown_end, high_val, low_val,
          max_drawdown) = calculate_max_drawdown(
              results, value_col='profit_abs', starting_balance=start_balance)
+        # max_relative_drawdown = Underwater
+        (_, _, _, _, _, max_relative_drawdown) = calculate_max_drawdown(
+             results, value_col='profit_abs', starting_balance=start_balance, relative=True)
+
         strat_stats.update({
             'max_drawdown': max_drawdown_legacy,  # Deprecated - do not use
             'max_drawdown_account': max_drawdown,
+            'max_relative_drawdown': max_relative_drawdown,
             'max_drawdown_abs': drawdown_abs,
             'drawdown_start': drawdown_start.strftime(DATETIME_PRINT_FORMAT),
             'drawdown_start_ts': drawdown_start.timestamp() * 1000,
@@ -497,6 +531,7 @@ def generate_strategy_stats(pairlist: List[str],
         strat_stats.update({
             'max_drawdown': 0.0,
             'max_drawdown_account': 0.0,
+            'max_relative_drawdown': 0.0,
             'max_drawdown_abs': 0.0,
             'max_drawdown_low': 0.0,
             'max_drawdown_high': 0.0,
@@ -565,7 +600,7 @@ def text_table_bt_results(pair_results: List[Dict[str, Any]], stake_currency: st
     output = [[
         t['key'], t['trades'], t['profit_mean_pct'], t['profit_sum_pct'], t['profit_total_abs'],
         t['profit_total_pct'], t['duration_avg'],
-        _generate_wins_draws_losses(t['wins'], t['draws'], t['losses'])
+        generate_wins_draws_losses(t['wins'], t['draws'], t['losses'])
     ] for t in pair_results]
     # Ignore type as floatfmt does allow tuples but mypy does not know that
     return tabulate(output, headers=headers,
@@ -591,7 +626,7 @@ def text_table_exit_reason(exit_reason_stats: List[Dict[str, Any]], stake_curren
 
     output = [[
         t.get('exit_reason', t.get('sell_reason')), t['trades'],
-        _generate_wins_draws_losses(t['wins'], t['draws'], t['losses']),
+        generate_wins_draws_losses(t['wins'], t['draws'], t['losses']),
         t['profit_mean_pct'], t['profit_sum_pct'],
         round_coin_value(t['profit_total_abs'], stake_currency, False),
         t['profit_total_pct'],
@@ -606,10 +641,10 @@ def text_table_tags(tag_type: str, tag_results: List[Dict[str, Any]], stake_curr
     :param stake_currency: stake-currency - used to correctly name headers
     :return: pretty printed table with tabulate as string
     """
-    if(tag_type == "enter_tag"):
+    if (tag_type == "enter_tag"):
         headers = _get_line_header("TAG", stake_currency)
     else:
-        headers = _get_line_header("TAG", stake_currency, 'Sells')
+        headers = _get_line_header("TAG", stake_currency, 'Exits')
     floatfmt = _get_line_floatfmt(stake_currency)
     output = [
         [
@@ -621,7 +656,7 @@ def text_table_tags(tag_type: str, tag_results: List[Dict[str, Any]], stake_curr
             t['profit_total_abs'],
             t['profit_total_pct'],
             t['duration_avg'],
-            _generate_wins_draws_losses(
+            generate_wins_draws_losses(
                 t['wins'],
                 t['draws'],
                 t['losses'])] for t in tag_results]
@@ -680,7 +715,7 @@ def text_table_strategy(strategy_results, stake_currency: str) -> str:
     output = [[
         t['key'], t['trades'], t['profit_mean_pct'], t['profit_sum_pct'], t['profit_total_abs'],
         t['profit_total_pct'], t['duration_avg'],
-        _generate_wins_draws_losses(t['wins'], t['draws'], t['losses']), drawdown]
+        generate_wins_draws_losses(t['wins'], t['draws'], t['losses']), drawdown]
         for t, drawdown in zip(strategy_results, drawdown)]
     # Ignore type as floatfmt does allow tuples but mypy does not know that
     return tabulate(output, headers=headers,
@@ -705,6 +740,32 @@ def text_table_add_metrics(strat_results: Dict) -> str:
                                                        strat_results['stake_currency'])),
         ] if strat_results.get('trade_count_short', 0) > 0 else []
 
+        drawdown_metrics = []
+        if 'max_relative_drawdown' in strat_results:
+            # Compatibility to show old hyperopt results
+            drawdown_metrics.append(
+                ('Max % of account underwater', f"{strat_results['max_relative_drawdown']:.2%}")
+            )
+        drawdown_metrics.extend([
+            ('Absolute Drawdown (Account)', f"{strat_results['max_drawdown_account']:.2%}")
+            if 'max_drawdown_account' in strat_results else (
+                'Drawdown', f"{strat_results['max_drawdown']:.2%}"),
+            ('Absolute Drawdown', round_coin_value(strat_results['max_drawdown_abs'],
+                                                   strat_results['stake_currency'])),
+            ('Drawdown high', round_coin_value(strat_results['max_drawdown_high'],
+                                               strat_results['stake_currency'])),
+            ('Drawdown low', round_coin_value(strat_results['max_drawdown_low'],
+                                              strat_results['stake_currency'])),
+            ('Drawdown Start', strat_results['drawdown_start']),
+            ('Drawdown End', strat_results['drawdown_end']),
+        ])
+
+        entry_adjustment_metrics = [
+            ('Canceled Trade Entries', strat_results.get('canceled_trade_entries', 'N/A')),
+            ('Canceled Entry Orders', strat_results.get('canceled_entry_orders', 'N/A')),
+            ('Replaced Entry Orders', strat_results.get('replaced_entry_orders', 'N/A')),
+        ] if strat_results.get('canceled_entry_orders', 0) > 0 else []
+
         # Newly added fields should be ignored if they are missing in strat_results. hyperopt-show
         # command stores these results and newer version of freqtrade must be able to handle old
         # results with missing new fields.
@@ -723,6 +784,9 @@ def text_table_add_metrics(strat_results: Dict) -> str:
             ('Absolute profit ', round_coin_value(strat_results['profit_total_abs'],
                                                   strat_results['stake_currency'])),
             ('Total profit %', f"{strat_results['profit_total']:.2%}"),
+            ('CAGR %', f"{strat_results['cagr']:.2%}" if 'cagr' in strat_results else 'N/A'),
+            ('Profit factor', f'{strat_results["profit_factor"]:.2f}' if 'profit_factor'
+                              in strat_results else 'N/A'),
             ('Trades per day', strat_results['trades_per_day']),
             ('Avg. daily profit %',
              f"{(strat_results['profit_total'] / strat_results['backtest_days']):.2%}"),
@@ -752,6 +816,7 @@ def text_table_add_metrics(strat_results: Dict) -> str:
             ('Entry/Exit Timeouts',
              f"{strat_results.get('timedout_entry_orders', 'N/A')} / "
              f"{strat_results.get('timedout_exit_orders', 'N/A')}"),
+            *entry_adjustment_metrics,
             ('', ''),  # Empty line to improve readability
 
             ('Min balance', round_coin_value(strat_results['csum_min'],
@@ -759,18 +824,7 @@ def text_table_add_metrics(strat_results: Dict) -> str:
             ('Max balance', round_coin_value(strat_results['csum_max'],
                                              strat_results['stake_currency'])),
 
-            # Compatibility to show old hyperopt results
-            ('Drawdown (Account)', f"{strat_results['max_drawdown_account']:.2%}")
-            if 'max_drawdown_account' in strat_results else (
-                'Drawdown', f"{strat_results['max_drawdown']:.2%}"),
-            ('Drawdown', round_coin_value(strat_results['max_drawdown_abs'],
-                                          strat_results['stake_currency'])),
-            ('Drawdown high', round_coin_value(strat_results['max_drawdown_high'],
-                                               strat_results['stake_currency'])),
-            ('Drawdown low', round_coin_value(strat_results['max_drawdown_low'],
-                                              strat_results['stake_currency'])),
-            ('Drawdown Start', strat_results['drawdown_start']),
-            ('Drawdown End', strat_results['drawdown_end']),
+            *drawdown_metrics,
             ('Market change', f"{strat_results['market_change']:.2%}"),
         ]
 
@@ -845,7 +899,7 @@ def show_backtest_result(strategy: str, results: Dict[str, Any], stake_currency:
     print()
 
 
-def show_backtest_results(config: Dict, backtest_stats: Dict):
+def show_backtest_results(config: Config, backtest_stats: Dict):
     stake_currency = config['stake_currency']
 
     for strategy, results in backtest_stats['strategy'].items():
@@ -865,7 +919,7 @@ def show_backtest_results(config: Dict, backtest_stats: Dict):
         print('\nFor more details, please look at the detail tables above')
 
 
-def show_sorted_pairlist(config: Dict, backtest_stats: Dict):
+def show_sorted_pairlist(config: Config, backtest_stats: Dict):
     if config.get('backtest_show_pair_list', False):
         for strategy, results in backtest_stats['strategy'].items():
             print(f"Pairs for Strategy {strategy}: \n[")

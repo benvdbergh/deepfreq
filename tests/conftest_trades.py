@@ -29,6 +29,7 @@ def mock_order_1(is_short: bool):
         'average': 0.123,
         'amount': 123.0,
         'filled': 123.0,
+        'cost': 15.129,
         'remaining': 0.0,
     }
 
@@ -65,6 +66,7 @@ def mock_order_2(is_short: bool):
         'price': 0.123,
         'amount': 123.0,
         'filled': 123.0,
+        'cost': 15.129,
         'remaining': 0.0,
     }
 
@@ -79,6 +81,7 @@ def mock_order_2_sell(is_short: bool):
         'price': 0.128,
         'amount': 123.0,
         'filled': 123.0,
+        'cost': 15.129,
         'remaining': 0.0,
     }
 
@@ -126,6 +129,7 @@ def mock_order_3(is_short: bool):
         'price': 0.05,
         'amount': 123.0,
         'filled': 123.0,
+        'cost': 15.129,
         'remaining': 0.0,
     }
 
@@ -141,6 +145,7 @@ def mock_order_3_sell(is_short: bool):
         'average': 0.06,
         'amount': 123.0,
         'filled': 123.0,
+        'cost': 15.129,
         'remaining': 0.0,
     }
 
@@ -186,6 +191,7 @@ def mock_order_4(is_short: bool):
         'price': 0.123,
         'amount': 123.0,
         'filled': 0.0,
+        'cost': 15.129,
         'remaining': 123.0,
     }
 
@@ -208,7 +214,8 @@ def mock_trade_4(fee, is_short: bool):
         open_order_id=f'prod_buy_{direc(is_short)}_12345',
         strategy='StrategyTestV3',
         timeframe=5,
-        is_short=is_short
+        is_short=is_short,
+        stop_loss_pct=0.10
     )
     o = Order.parse_from_ccxt_object(mock_order_4(is_short), 'ETC/BTC', entry_side(is_short))
     trade.orders.append(o)
@@ -225,6 +232,7 @@ def mock_order_5(is_short: bool):
         'price': 0.123,
         'amount': 123.0,
         'filled': 123.0,
+        'cost': 15.129,
         'remaining': 0.0,
     }
 
@@ -239,6 +247,7 @@ def mock_order_5_stoploss(is_short: bool):
         'price': 0.123,
         'amount': 123.0,
         'filled': 0.0,
+        'cost': 0.0,
         'remaining': 123.0,
     }
 
@@ -262,7 +271,8 @@ def mock_trade_5(fee, is_short: bool):
         enter_tag='TEST1',
         stoploss_order_id=f'prod_stoploss_{direc(is_short)}_3455',
         timeframe=5,
-        is_short=is_short
+        is_short=is_short,
+        stop_loss_pct=0.10,
     )
     o = Order.parse_from_ccxt_object(mock_order_5(is_short), 'XRP/BTC', entry_side(is_short))
     trade.orders.append(o)
@@ -281,6 +291,7 @@ def mock_order_6(is_short: bool):
         'price': 0.15,
         'amount': 2.0,
         'filled': 2.0,
+        'cost': 0.3,
         'remaining': 0.0,
     }
 
@@ -295,6 +306,7 @@ def mock_order_6_sell(is_short: bool):
         'price': 0.15 if is_short else 0.20,
         'amount': 2.0,
         'filled': 0.0,
+        'cost': 0.0,
         'remaining': 2.0,
     }
 
@@ -337,6 +349,7 @@ def short_order():
         'price': 0.123,
         'amount': 123.0,
         'filled': 123.0,
+        'cost': 15.129,
         'remaining': 0.0,
     }
 
@@ -351,6 +364,7 @@ def exit_short_order():
         'price': 0.128,
         'amount': 123.0,
         'filled': 123.0,
+        'cost': 15.744,
         'remaining': 0.0,
     }
 
@@ -424,6 +438,7 @@ def leverage_order():
         'amount': 123.0,
         'filled': 123.0,
         'remaining': 0.0,
+        'cost': 15.129,
         'leverage': 5.0
     }
 
@@ -439,6 +454,7 @@ def leverage_order_sell():
         'amount': 123.0,
         'filled': 123.0,
         'remaining': 0.0,
+        'cost': 15.744,
         'leverage': 5.0
     }
 

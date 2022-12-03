@@ -11,11 +11,11 @@ import utils_find_1st as utf1st
 from pandas import DataFrame
 
 from freqtrade.configuration import TimeRange
-from freqtrade.constants import DATETIME_PRINT_FORMAT, UNLIMITED_STAKE_AMOUNT
+from freqtrade.constants import DATETIME_PRINT_FORMAT, UNLIMITED_STAKE_AMOUNT, Config
 from freqtrade.data.history import get_timerange, load_data, refresh_data
 from freqtrade.enums import CandleType, ExitType, RunMode
 from freqtrade.exceptions import OperationalException
-from freqtrade.exchange.exchange import timeframe_to_seconds
+from freqtrade.exchange import timeframe_to_seconds
 from freqtrade.plugins.pairlist.pairlist_helpers import expand_pairlist
 from freqtrade.strategy.interface import IStrategy
 
@@ -42,10 +42,9 @@ class Edge:
     Author: https://github.com/mishaker
     """
 
-    config: Dict = {}
     _cached_pairs: Dict[str, Any] = {}  # Keeps a list of pairs
 
-    def __init__(self, config: Dict[str, Any], exchange, strategy) -> None:
+    def __init__(self, config: Config, exchange, strategy) -> None:
 
         self.config = config
         self.exchange = exchange
@@ -393,7 +392,7 @@ class Edge:
         # Returning a list of pairs in order of "expectancy"
         return final
 
-    def _find_trades_for_stoploss_range(self, df, pair, stoploss_range):
+    def _find_trades_for_stoploss_range(self, df, pair: str, stoploss_range) -> list:
         buy_column = df['enter_long'].values
         sell_column = df['exit_long'].values
         date_column = df['date'].values
@@ -408,7 +407,7 @@ class Edge:
         return result
 
     def _detect_next_stop_or_sell_point(self, buy_column, sell_column, date_column,
-                                        ohlc_columns, stoploss, pair):
+                                        ohlc_columns, stoploss, pair: str):
         """
         Iterate through ohlc_columns in order to find the next trade
         Next trade opens from the first buy signal noticed to

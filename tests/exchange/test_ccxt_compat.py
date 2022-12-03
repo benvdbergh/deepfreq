@@ -13,6 +13,7 @@ import pytest
 
 from freqtrade.enums import CandleType
 from freqtrade.exchange import timeframe_to_minutes, timeframe_to_prev_date
+from freqtrade.exchange.exchange import timeframe_to_msecs
 from freqtrade.resolvers.exchange_resolver import ExchangeResolver
 from tests.conftest import get_default_conf_usdt
 
@@ -27,15 +28,15 @@ EXCHANGES = {
         'leverage_tiers_public': False,
         'leverage_in_spot_market': False,
     },
-    'binance': {
-        'pair': 'BTC/USDT',
-        'stake_currency': 'USDT',
-        'hasQuoteVolume': True,
-        'timeframe': '5m',
-        'futures': True,
-        'leverage_tiers_public': False,
-        'leverage_in_spot_market': False,
-    },
+    # 'binance': {
+    #     'pair': 'BTC/USDT',
+    #     'stake_currency': 'USDT',
+    #     'hasQuoteVolume': True,
+    #     'timeframe': '5m',
+    #     'futures': True,
+    #     'leverage_tiers_public': False,
+    #     'leverage_in_spot_market': False,
+    # },
     'kraken': {
         'pair': 'BTC/USDT',
         'stake_currency': 'USDT',
@@ -44,18 +45,8 @@ EXCHANGES = {
         'leverage_tiers_public': False,
         'leverage_in_spot_market': True,
     },
-    'ftx': {
-        'pair': 'BTC/USD',
-        'stake_currency': 'USD',
-        'hasQuoteVolume': True,
-        'timeframe': '5m',
-        'futures_pair': 'BTC/USD:USD',
-        'futures': False,
-        'leverage_tiers_public': False,  # TODO: Set to True once implemented on CCXT
-        'leverage_in_spot_market': True,
-    },
     'kucoin': {
-        'pair': 'BTC/USDT',
+        'pair': 'XRP/USDT',
         'stake_currency': 'USDT',
         'hasQuoteVolume': True,
         'timeframe': '5m',
@@ -135,7 +126,14 @@ def exchange_futures(request, exchange_conf, class_mocker):
         class_mocker.patch(
             'freqtrade.exchange.binance.Binance.fill_leverage_tiers')
         class_mocker.patch('freqtrade.exchange.exchange.Exchange.fetch_trading_fees')
-        exchange = ExchangeResolver.load_exchange(request.param, exchange_conf, validate=True)
+        class_mocker.patch('freqtrade.exchange.okx.Okx.additional_exchange_init')
+        class_mocker.patch('freqtrade.exchange.binance.Binance.additional_exchange_init')
+        class_mocker.patch('freqtrade.exchange.exchange.Exchange.load_cached_leverage_tiers',
+                           return_value=None)
+        class_mocker.patch('freqtrade.exchange.exchange.Exchange.cache_leverage_tiers')
+
+        exchange = ExchangeResolver.load_exchange(
+            request.param, exchange_conf, validate=True, load_leverage_tiers=True)
 
         yield exchange, request.param
 
@@ -150,6 +148,25 @@ class TestCCXTExchange():
         assert pair in markets
         assert isinstance(markets[pair], dict)
         assert exchange.market_is_spot(markets[pair])
+
+    def test_has_validations(self, exchange):
+
+        exchange, exchangename = exchange
+
+        exchange.validate_ordertypes({
+            'entry': 'limit',
+            'exit': 'limit',
+            'stoploss': 'limit',
+            })
+
+        if exchangename == 'gateio':
+            # gateio doesn't have market orders on spot
+            return
+        exchange.validate_ordertypes({
+            'entry': 'market',
+            'exit': 'market',
+            'stoploss': 'market',
+            })
 
     def test_load_markets_futures(self, exchange_futures):
         exchange, exchangename = exchange_futures
@@ -197,8 +214,13 @@ class TestCCXTExchange():
         l2 = exchange.fetch_l2_order_book(pair)
         assert 'asks' in l2
         assert 'bids' in l2
+        assert len(l2['asks']) >= 1
+        assert len(l2['bids']) >= 1
         l2_limit_range = exchange._ft_has['l2_limit_range']
         l2_limit_range_required = exchange._ft_has['l2_limit_range_required']
+        if exchangename == 'gateio':
+            # TODO: Gateio is unstable here at the moment, ignoring the limit partially.
+            return
         for val in [1, 2, 5, 25, 100]:
             l2 = exchange.fetch_l2_order_book(pair, val)
             if not l2_limit_range or val in l2_limit_range:
@@ -218,7 +240,7 @@ class TestCCXTExchange():
                     assert len(l2['asks']) == next_limit
                     assert len(l2['asks']) == next_limit
 
-    def test_fetch_ohlcv(self, exchange):
+    def test_ccxt_fetch_ohlcv(self, exchange):
         exchange, exchangename = exchange
         pair = EXCHANGES[exchangename]['pair']
         timeframe = EXCHANGES[exchangename]['timeframe']
@@ -230,10 +252,57 @@ class TestCCXTExchange():
         assert len(ohlcv[pair_tf]) == len(exchange.klines(pair_tf))
         # assert len(exchange.klines(pair_tf)) > 200
         # Assume 90% uptime ...
-        assert len(exchange.klines(pair_tf)) > exchange.ohlcv_candle_limit(timeframe) * 0.90
+        assert len(exchange.klines(pair_tf)) > exchange.ohlcv_candle_limit(
+            timeframe, CandleType.SPOT) * 0.90
         # Check if last-timeframe is within the last 2 intervals
         now = datetime.now(timezone.utc) - timedelta(minutes=(timeframe_to_minutes(timeframe) * 2))
         assert exchange.klines(pair_tf).iloc[-1]['date'] >= timeframe_to_prev_date(timeframe, now)
+
+    def ccxt__async_get_candle_history(self, exchange, exchangename, pair, timeframe, candle_type):
+
+        timeframe_ms = timeframe_to_msecs(timeframe)
+        now = timeframe_to_prev_date(
+                timeframe, datetime.now(timezone.utc))
+        for offset in (360, 120, 30, 10, 5, 2):
+            since = now - timedelta(days=offset)
+            since_ms = int(since.timestamp() * 1000)
+
+            res = exchange.loop.run_until_complete(exchange._async_get_candle_history(
+                pair=pair,
+                timeframe=timeframe,
+                since_ms=since_ms,
+                candle_type=candle_type
+            )
+            )
+            assert res
+            assert res[0] == pair
+            assert res[1] == timeframe
+            assert res[2] == candle_type
+            candles = res[3]
+            candle_count = exchange.ohlcv_candle_limit(timeframe, candle_type, since_ms) * 0.9
+            candle_count1 = (now.timestamp() * 1000 - since_ms) // timeframe_ms
+            assert len(candles) >= min(candle_count, candle_count1)
+            assert candles[0][0] == since_ms or (since_ms + timeframe_ms)
+
+    def test_ccxt__async_get_candle_history(self, exchange):
+        exchange, exchangename = exchange
+        # For some weired reason, this test returns random lengths for bittrex.
+        if not exchange._ft_has['ohlcv_has_history'] or exchangename in ('bittrex'):
+            return
+        pair = EXCHANGES[exchangename]['pair']
+        timeframe = EXCHANGES[exchangename]['timeframe']
+        self.ccxt__async_get_candle_history(
+            exchange, exchangename, pair, timeframe, CandleType.SPOT)
+
+    def test_ccxt__async_get_candle_history_futures(self, exchange_futures):
+        exchange, exchangename = exchange_futures
+        if not exchange:
+            # exchange_futures only returns values for supported exchanges
+            return
+        pair = EXCHANGES[exchangename].get('futures_pair', EXCHANGES[exchangename]['pair'])
+        timeframe = EXCHANGES[exchangename]['timeframe']
+        self.ccxt__async_get_candle_history(
+            exchange, exchangename, pair, timeframe, CandleType.FUTURES)
 
     def test_ccxt_fetch_funding_rate_history(self, exchange_futures):
         exchange, exchangename = exchange_futures
@@ -345,14 +414,14 @@ class TestCCXTExchange():
                 assert (isinstance(futures_leverage, float) or isinstance(futures_leverage, int))
                 assert futures_leverage >= 1.0
 
-    def test_ccxt__get_contract_size(self, exchange_futures):
+    def test_ccxt_get_contract_size(self, exchange_futures):
         futures, futures_name = exchange_futures
         if futures:
             futures_pair = EXCHANGES[futures_name].get(
                 'futures_pair',
                 EXCHANGES[futures_name]['pair']
             )
-            contract_size = futures._get_contract_size(futures_pair)
+            contract_size = futures.get_contract_size(futures_pair)
             assert (isinstance(contract_size, float) or isinstance(contract_size, int))
             assert contract_size >= 0.0
 
@@ -404,6 +473,7 @@ class TestCCXTExchange():
                 False,
                 100,
                 100,
+                100,
             )
             assert (isinstance(liquidation_price, float))
             assert liquidation_price >= 0.0
@@ -412,6 +482,7 @@ class TestCCXTExchange():
                 futures_pair,
                 40000,
                 False,
+                100,
                 100,
                 100,
             )

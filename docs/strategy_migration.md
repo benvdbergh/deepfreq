@@ -18,7 +18,7 @@ Note : `forcesell`, `forcebuy`, `emergencysell` are changed to `force_exit`, `fo
   * [`check_buy_timeout()` -> `check_entry_timeout()`](#custom_entry_timeout)
   * [`check_sell_timeout()` -> `check_exit_timeout()`](#custom_entry_timeout)
   * New `side` argument to callbacks without trade object
-    * [`custom_stake_amount`](#custom-stake-amount)
+    * [`custom_stake_amount`](#custom_stake_amount)
     * [`confirm_trade_entry`](#confirm_trade_entry)
     * [`custom_entry_price`](#custom_entry_price)
   * [Changed argument name in `confirm_trade_exit`](#confirm_trade_exit)
@@ -43,19 +43,25 @@ Note : `forcesell`, `forcebuy`, `emergencysell` are changed to `force_exit`, `fo
   * `order_time_in_force` buy -> entry, sell -> exit.
   * `order_types` buy -> entry, sell -> exit.
   * `unfilledtimeout` buy -> entry, sell -> exit.
+  * `ignore_buying_expired_candle_after` -> moved to root level instead of "ask_strategy/exit_pricing"
 * Terminology changes
   * Sell reasons changed to reflect the new naming of "exit" instead of sells. Be careful in your strategy if you're using `exit_reason` checks and eventually update your strategy.
     * `sell_signal` -> `exit_signal`
     * `custom_sell` -> `custom_exit`
     * `force_sell` -> `force_exit`
     * `emergency_sell` -> `emergency_exit`
+  * Order pricing
+    * `bid_strategy` -> `entry_pricing`
+    * `ask_strategy` -> `exit_pricing`
+    * `ask_last_balance` -> `price_last_balance`
+    * `bid_last_balance` -> `price_last_balance`
   * Webhook terminology changed from "sell" to "exit", and from "buy" to entry
-    * `webhookbuy` -> `webhookentry`
-    * `webhookbuyfill` -> `webhookentryfill`
-    * `webhookbuycancel` -> `webhookentrycancel`
-    * `webhooksell` -> `webhookexit`
-    * `webhooksellfill` -> `webhookexitfill`
-    * `webhooksellcancel` -> `webhookexitcancel`
+    * `webhookbuy` -> `entry`
+    * `webhookbuyfill` -> `entry_fill`
+    * `webhookbuycancel` -> `entry_cancel`
+    * `webhooksell` -> `exit`
+    * `webhooksellfill` -> `exit_fill`
+    * `webhooksellcancel` -> `exit_cancel`
   * Telegram notification settings
     * `buy` -> `entry`
     * `buy_fill` -> `entry_fill`
@@ -192,14 +198,14 @@ class AwesomeStrategy(IStrategy):
         return False 
 ```
 
-### Custom-stake-amount
+### `custom_stake_amount`
 
 New string argument `side` - which can be either `"long"` or `"short"`.
 
 ``` python hl_lines="4"
 class AwesomeStrategy(IStrategy):
     def custom_stake_amount(self, pair: str, current_time: datetime, current_rate: float,
-                            proposed_stake: float, min_stake: float, max_stake: float,
+                            proposed_stake: float, min_stake: Optional[float], max_stake: float,
                             entry_tag: Optional[str], **kwargs) -> float:
         # ... 
         return proposed_stake
@@ -208,7 +214,7 @@ class AwesomeStrategy(IStrategy):
 ``` python hl_lines="4"
 class AwesomeStrategy(IStrategy):
     def custom_stake_amount(self, pair: str, current_time: datetime, current_rate: float,
-                            proposed_stake: float, min_stake: float, max_stake: float,
+                            proposed_stake: float, min_stake: Optional[float], max_stake: float,
                             entry_tag: Optional[str], side: str, **kwargs) -> float:
         # ... 
         return proposed_stake
@@ -332,8 +338,8 @@ After:
 
 ``` python hl_lines="2 3"
     order_time_in_force: Dict = {
-        "entry": "gtc",
-        "exit": "gtc",
+        "entry": "GTC",
+        "exit": "GTC",
     }
 ```
 
@@ -443,6 +449,7 @@ Please refer to the [pricing documentation](configuration.md#prices-used-for-ord
         "use_order_book": true,
         "order_book_top": 1,
         "bid_last_balance": 0.0
+        "ignore_buying_expired_candle_after": 120
     }
 }
 ```
@@ -466,6 +473,7 @@ after:
         "use_order_book": true,
         "order_book_top": 1,
         "price_last_balance": 0.0
-    }
+    },
+    "ignore_buying_expired_candle_after": 120
 }
 ```

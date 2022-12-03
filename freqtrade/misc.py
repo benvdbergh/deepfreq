@@ -2,19 +2,20 @@
 Various tool function for Freqtrade and scripts
 """
 import gzip
-import hashlib
 import logging
 import re
-from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator, List, Union
+from typing import Any, Dict, Iterator, List, Mapping, Union
 from typing.io import IO
 from urllib.parse import urlparse
 
+import orjson
+import pandas as pd
 import rapidjson
 
 from freqtrade.constants import DECIMAL_PER_COIN_FALLBACK, DECIMALS_PER_COIN
+from freqtrade.enums import SignalTagType, SignalType
 
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,22 @@ def file_dump_json(filename: Path, data: Any, is_zip: bool = False, log: bool = 
             rapidjson.dump(data, fp, default=str, number_mode=rapidjson.NM_NATIVE)
 
     logger.debug(f'done json to "{filename}"')
+
+
+def file_dump_joblib(filename: Path, data: Any, log: bool = True) -> None:
+    """
+    Dump object data into a file
+    :param filename: file to create
+    :param data: Object data to save
+    :return:
+    """
+    import joblib
+
+    if log:
+        logger.info(f'dumping joblib to "{filename}"')
+    with open(filename, 'wb') as fp:
+        joblib.dump(data, fp)
+    logger.debug(f'done joblib dump to "{filename}"')
 
 
 def json_load(datafile: IO) -> Any:
@@ -170,7 +187,10 @@ def safe_value_fallback(obj: dict, key1: str, key2: str, default_value=None):
     return default_value
 
 
-def safe_value_fallback2(dict1: dict, dict2: dict, key1: str, key2: str, default_value=None):
+dictMap = Union[Dict[str, Any], Mapping[str, Any]]
+
+
+def safe_value_fallback2(dict1: dictMap, dict2: dictMap, key1: str, key2: str, default_value=None):
     """
     Search a value in dict1, return this if it's not None.
     Fall back to dict2 - return key2 from dict2 if it's not None.
@@ -237,32 +257,47 @@ def parse_db_uri_for_logging(uri: str):
     return parsed_db_uri.geturl().replace(f':{pwd}@', ':*****@')
 
 
-def get_strategy_run_id(strategy) -> str:
+def dataframe_to_json(dataframe: pd.DataFrame) -> str:
     """
-    Generate unique identification hash for a backtest run. Identical config and strategy file will
-    always return an identical hash.
-    :param strategy: strategy object.
-    :return: hex string id.
+    Serialize a DataFrame for transmission over the wire using JSON
+    :param dataframe: A pandas DataFrame
+    :returns: A JSON string of the pandas DataFrame
     """
-    digest = hashlib.sha1()
-    config = deepcopy(strategy.config)
+    # https://github.com/pandas-dev/pandas/issues/24889
+    # https://github.com/pandas-dev/pandas/issues/40443
+    # We need to convert to a dict to avoid mem leak
+    def default(z):
+        if isinstance(z, pd.Timestamp):
+            return z.timestamp() * 1e3
+        raise TypeError
 
-    # Options that have no impact on results of individual backtest.
-    not_important_keys = ('strategy_list', 'original_config', 'telegram', 'api_server')
-    for k in not_important_keys:
-        if k in config:
-            del config[k]
-
-    # Explicitly allow NaN values (e.g. max_open_trades).
-    # as it does not matter for getting the hash.
-    digest.update(rapidjson.dumps(config, default=str,
-                                  number_mode=rapidjson.NM_NAN).encode('utf-8'))
-    with open(strategy.__file__, 'rb') as fp:
-        digest.update(fp.read())
-    return digest.hexdigest().lower()
+    return str(orjson.dumps(dataframe.to_dict(orient='split'), default=default), 'utf-8')
 
 
-def get_backtest_metadata_filename(filename: Union[Path, str]) -> Path:
-    """Return metadata filename for specified backtest results file."""
-    filename = Path(filename)
-    return filename.parent / Path(f'{filename.stem}.meta{filename.suffix}')
+def json_to_dataframe(data: str) -> pd.DataFrame:
+    """
+    Deserialize JSON into a DataFrame
+    :param data: A JSON string
+    :returns: A pandas DataFrame from the JSON string
+    """
+    dataframe = pd.read_json(data, orient='split')
+    if 'date' in dataframe.columns:
+        dataframe['date'] = pd.to_datetime(dataframe['date'], unit='ms', utc=True)
+
+    return dataframe
+
+
+def remove_entry_exit_signals(dataframe: pd.DataFrame):
+    """
+    Remove Entry and Exit signals from a DataFrame
+
+    :param dataframe: The DataFrame to remove signals from
+    """
+    dataframe[SignalType.ENTER_LONG.value] = 0
+    dataframe[SignalType.EXIT_LONG.value] = 0
+    dataframe[SignalType.ENTER_SHORT.value] = 0
+    dataframe[SignalType.EXIT_SHORT.value] = 0
+    dataframe[SignalTagType.ENTER_TAG.value] = None
+    dataframe[SignalTagType.EXIT_TAG.value] = None
+
+    return dataframe

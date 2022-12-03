@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, Union
 
+from freqtrade.constants import Config
 from freqtrade.exceptions import OperationalException
 
 
@@ -41,10 +42,12 @@ class IResolver:
     object_type_str: str
     user_subdir: Optional[str] = None
     initial_search_path: Optional[Path]
+    # Optional config setting containing a path (strategy_path, freqaimodel_path)
+    extra_path: Optional[str] = None
 
     @classmethod
-    def build_search_paths(cls, config: Dict[str, Any], user_subdir: Optional[str] = None,
-                           extra_dir: Optional[str] = None) -> List[Path]:
+    def build_search_paths(cls, config: Config, user_subdir: Optional[str] = None,
+                           extra_dirs: List[str] = []) -> List[Path]:
 
         abs_paths: List[Path] = []
         if cls.initial_search_path:
@@ -53,9 +56,12 @@ class IResolver:
         if user_subdir:
             abs_paths.insert(0, config['user_data_dir'].joinpath(user_subdir))
 
-        if extra_dir:
-            # Add extra directory to the top of the search paths
-            abs_paths.insert(0, Path(extra_dir).resolve())
+        # Add extra directory to the top of the search paths
+        for dir in extra_dirs:
+            abs_paths.insert(0, Path(dir).resolve())
+
+        if cls.extra_path and (extra := config.get(cls.extra_path)):
+            abs_paths.insert(0, Path(extra).resolve())
 
         return abs_paths
 
@@ -153,7 +159,7 @@ class IResolver:
         return None
 
     @classmethod
-    def load_object(cls, object_name: str, config: dict, *, kwargs: dict,
+    def load_object(cls, object_name: str, config: Config, *, kwargs: dict,
                     extra_dir: Optional[str] = None) -> Any:
         """
         Search and loads the specified object as configured in hte child class.
@@ -164,9 +170,13 @@ class IResolver:
         :return: Object instance or None
         """
 
+        extra_dirs: List[str] = []
+        if extra_dir:
+            extra_dirs.append(extra_dir)
+
         abs_paths = cls.build_search_paths(config,
                                            user_subdir=cls.user_subdir,
-                                           extra_dir=extra_dir)
+                                           extra_dirs=extra_dirs)
 
         found_object = cls._load_object(paths=abs_paths, object_name=object_name,
                                         kwargs=kwargs)
@@ -178,18 +188,55 @@ class IResolver:
         )
 
     @classmethod
-    def search_all_objects(cls, directory: Path,
-                           enum_failed: bool) -> List[Dict[str, Any]]:
+    def search_all_objects(cls, config: Config, enum_failed: bool,
+                           recursive: bool = False) -> List[Dict[str, Any]]:
+        """
+        Searches for valid objects
+        :param config: Config object
+        :param enum_failed: If True, will return None for modules which fail.
+            Otherwise, failing modules are skipped.
+        :param recursive: Recursively walk directory tree searching for strategies
+        :return: List of dicts containing 'name', 'class' and 'location' entries
+        """
+        result = []
+
+        abs_paths = cls.build_search_paths(config, user_subdir=cls.user_subdir)
+        for path in abs_paths:
+            result.extend(cls._search_all_objects(path, enum_failed, recursive))
+        return result
+
+    @classmethod
+    def _build_rel_location(cls, directory: Path, entry: Path) -> str:
+
+        builtin = cls.initial_search_path == directory
+        return f"<builtin>/{entry.relative_to(directory)}" if builtin else str(
+            entry.relative_to(directory))
+
+    @classmethod
+    def _search_all_objects(
+            cls, directory: Path, enum_failed: bool, recursive: bool = False,
+            basedir: Optional[Path] = None) -> List[Dict[str, Any]]:
         """
         Searches a directory for valid objects
         :param directory: Path to search
         :param enum_failed: If True, will return None for modules which fail.
             Otherwise, failing modules are skipped.
+        :param recursive: Recursively walk directory tree searching for strategies
         :return: List of dicts containing 'name', 'class' and 'location' entries
         """
         logger.debug(f"Searching for {cls.object_type.__name__} '{directory}'")
-        objects = []
+        objects: List[Dict[str, Any]] = []
+        if not directory.is_dir():
+            logger.info(f"'{directory}' is not a directory, skipping.")
+            return objects
         for entry in directory.iterdir():
+            if (
+                recursive and entry.is_dir()
+                and not entry.name.startswith('__')
+                and not entry.name.startswith('.')
+            ):
+                objects.extend(cls._search_all_objects(
+                    entry, enum_failed, recursive, basedir or directory))
             # Only consider python files
             if entry.suffix != '.py':
                 logger.debug('Ignoring %s', entry)
@@ -202,5 +249,6 @@ class IResolver:
                     {'name': obj[0].__name__ if obj is not None else '',
                      'class': obj[0] if obj is not None else None,
                      'location': entry,
+                     'location_rel': cls._build_rel_location(basedir or directory, entry),
                      })
         return objects

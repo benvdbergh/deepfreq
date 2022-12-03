@@ -5,6 +5,7 @@
 import numpy as np  # noqa
 import pandas as pd  # noqa
 from pandas import DataFrame
+from typing import Optional, Union
 
 from freqtrade.strategy import (BooleanParameter, CategoricalParameter, DecimalParameter,
                                 IStrategy, IntParameter)
@@ -62,7 +63,7 @@ class SampleStrategy(IStrategy):
     timeframe = '5m'
 
     # Run "populate_indicators()" only for new candle.
-    process_only_new_candles = False
+    process_only_new_candles = True
 
     # These values can be overridden in the config.
     use_exit_signal = True
@@ -88,8 +89,8 @@ class SampleStrategy(IStrategy):
 
     # Optional order time in force.
     order_time_in_force = {
-        'entry': 'gtc',
-        'exit': 'gtc'
+        'entry': 'GTC',
+        'exit': 'GTC'
     }
 
     plot_config = {

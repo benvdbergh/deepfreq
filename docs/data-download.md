@@ -25,18 +25,19 @@ usage: freqtrade download-data [-h] [-v] [--logfile FILE] [-V] [-c PATH]
                                [--include-inactive-pairs]
                                [--timerange TIMERANGE] [--dl-trades]
                                [--exchange EXCHANGE]
-                               [-t {1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} [{1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} ...]]
-                               [--erase]
-                               [--data-format-ohlcv {json,jsongz,hdf5}]
+                               [-t TIMEFRAMES [TIMEFRAMES ...]] [--erase]
+                               [--data-format-ohlcv {json,jsongz,hdf5,feather,parquet}]
                                [--data-format-trades {json,jsongz,hdf5}]
                                [--trading-mode {spot,margin,futures}]
+                               [--prepend]
 
 optional arguments:
   -h, --help            show this help message and exit
   -p PAIRS [PAIRS ...], --pairs PAIRS [PAIRS ...]
                         Limit command to these pairs. Pairs are space-
                         separated.
-  --pairs-file FILE     File containing a list of pairs to download.
+  --pairs-file FILE     File containing a list of pairs. Takes precedence over
+                        --pairs or pairs configured in the configuration.
   --days INT            Download data for given number of days.
   --new-pairs-days INT  Download data of new pairs for given number of days.
                         Default: `None`.
@@ -49,19 +50,20 @@ optional arguments:
                         as --timeframes/-t.
   --exchange EXCHANGE   Exchange name (default: `bittrex`). Only valid if no
                         config is provided.
-  -t {1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} [{1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} ...], --timeframes {1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} [{1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} ...]
+  -t TIMEFRAMES [TIMEFRAMES ...], --timeframes TIMEFRAMES [TIMEFRAMES ...]
                         Specify which tickers to download. Space-separated
                         list. Default: `1m 5m`.
   --erase               Clean all existing data for the selected
                         exchange/pairs/timeframes.
-  --data-format-ohlcv {json,jsongz,hdf5}
+  --data-format-ohlcv {json,jsongz,hdf5,feather,parquet}
                         Storage format for downloaded candle (OHLCV) data.
                         (default: `json`).
   --data-format-trades {json,jsongz,hdf5}
                         Storage format for downloaded trades data. (default:
                         `jsongz`).
-  --trading-mode {spot,margin,futures}
+  --trading-mode {spot,margin,futures}, --tradingmode {spot,margin,futures}
                         Select Trading mode
+  --prepend             Allow data prepending. (Data-appending is disabled)
 
 Common arguments:
   -v, --verbose         Verbose mode (-vv for more, -vvv to get all messages).
@@ -74,7 +76,7 @@ Common arguments:
                         `userdir/config.json` or `config.json` whichever
                         exists). Multiple --config options may be used. Can be
                         set to `-` to read config from stdin.
-  -d PATH, --datadir PATH
+  -d PATH, --datadir PATH, --data-dir PATH
                         Path to directory with historical backtesting data.
   --userdir PATH, --user-data-dir PATH
                         Path to userdata directory.
@@ -157,23 +159,36 @@ freqtrade download-data --exchange binance --pairs .*/USDT
 - To change the exchange used to download the historical data from, please use a different configuration file (you'll probably need to adjust rate limits etc.)
 - To use `pairs.json` from some other directory, use `--pairs-file some_other_dir/pairs.json`.
 - To download historical candle (OHLCV) data for only 10 days, use `--days 10` (defaults to 30 days).
-- To download historical candle (OHLCV) data from a fixed starting point, use `--timerange 20200101-` - which will download all data from January 1st, 2020. Eventually set end dates are ignored.
+- To download historical candle (OHLCV) data from a fixed starting point, use `--timerange 20200101-` - which will download all data from January 1st, 2020.
 - Use `--timeframes` to specify what timeframe download the historical candle (OHLCV) data for. Default is `--timeframes 1m 5m` which will download 1-minute and 5-minute data.
 - To use exchange, timeframe and list of pairs as defined in your configuration file, use the `-c/--config` option. With this, the script uses the whitelist defined in the config as the list of currency pairs to download data for and does not require the pairs.json file. You can combine `-c/--config` with most other options.
 
+#### Download additional data before the current timerange
+
+Assuming you downloaded all data from 2022 (`--timerange 20220101-`) - but you'd now like to also backtest with earlier data.
+You can do so by using the `--prepend` flag, combined with `--timerange` - specifying an end-date.
+
+``` bash
+freqtrade download-data --exchange binance --pairs ETH/USDT XRP/USDT BTC/USDT --prepend --timerange 20210101-20220101
+```
+
+!!! Note
+    Freqtrade will ignore the end-date in this mode if data is available, updating the end-date to the existing data start point.
 
 ### Data format
 
-Freqtrade currently supports 3 data-formats for both OHLCV and trades data:
+Freqtrade currently supports the following data-formats:
 
-* `json` (plain "text" json files)
-* `jsongz` (a gzip-zipped version of json files)
-* `hdf5` (a high performance datastore)
+* `json` -  plain "text" json files
+* `jsongz` - a gzip-zipped version of json files
+* `hdf5` - a high performance datastore
+* `feather` - a dataformat based on Apache Arrow (OHLCV only)
+* `parquet` - columnar datastore (OHLCV only)
 
 By default, OHLCV data is stored as `json` data, while trades data is stored as `jsongz` data.
 
 This can be changed via the `--data-format-ohlcv` and `--data-format-trades` command line arguments respectively.
-To persist this change, you can should also add the following snippet to your configuration, so you don't have to insert the above arguments each time:
+To persist this change, you should also add the following snippet to your configuration, so you don't have to insert the above arguments each time:
 
 ``` jsonc
     // ...
@@ -187,38 +202,74 @@ If the default data-format has been changed during download, then the keys `data
 !!! Note
     You can convert between data-formats using the [convert-data](#sub-command-convert-data) and [convert-trade-data](#sub-command-convert-trade-data) methods.
 
+#### Dataformat comparison
+
+The following comparisons have been made with the following data, and by using the linux `time` command.
+
+```
+Found 6 pair / timeframe combinations.
++----------+-------------+--------+---------------------+---------------------+
+|     Pair |   Timeframe |   Type |                From |                  To |
+|----------+-------------+--------+---------------------+---------------------|
+| BTC/USDT |          5m |   spot | 2017-08-17 04:00:00 | 2022-09-13 19:25:00 |
+| ETH/USDT |          1m |   spot | 2017-08-17 04:00:00 | 2022-09-13 19:26:00 |
+| BTC/USDT |          1m |   spot | 2017-08-17 04:00:00 | 2022-09-13 19:30:00 |
+| XRP/USDT |          5m |   spot | 2018-05-04 08:10:00 | 2022-09-13 19:15:00 |
+| XRP/USDT |          1m |   spot | 2018-05-04 08:11:00 | 2022-09-13 19:22:00 |
+| ETH/USDT |          5m |   spot | 2017-08-17 04:00:00 | 2022-09-13 19:20:00 |
++----------+-------------+--------+---------------------+---------------------+
+```
+
+Timings have been taken in a not very scientific way with the following command, which forces reading the data into memory.
+
+``` bash
+time freqtrade list-data --show-timerange --data-format-ohlcv <dataformat>
+```
+
+|  Format | Size | timing |
+|------------|-------------|-------------|
+| `json` | 149Mb | 25.6s |
+| `jsongz` | 39Mb | 27s |
+| `hdf5` | 145Mb | 3.9s |
+| `feather` | 72Mb | 3.5s |
+| `parquet` | 83Mb | 3.8s |
+
+Size has been taken from the BTC/USDT 1m spot combination for the timerange specified above.
+
+To have a best performance/size mix, we recommend the use of either feather or parquet.
+
 #### Sub-command convert data
 
 ```
 usage: freqtrade convert-data [-h] [-v] [--logfile FILE] [-V] [-c PATH]
                               [-d PATH] [--userdir PATH]
                               [-p PAIRS [PAIRS ...]] --format-from
-                              {json,jsongz,hdf5} --format-to
-                              {json,jsongz,hdf5} [--erase]
-                              [-t {1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} [{1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} ...]]
+                              {json,jsongz,hdf5,feather,parquet} --format-to
+                              {json,jsongz,hdf5,feather,parquet} [--erase]
                               [--exchange EXCHANGE]
+                              [-t TIMEFRAMES [TIMEFRAMES ...]]
                               [--trading-mode {spot,margin,futures}]
-                              [--candle-types {spot,,futures,mark,index,premiumIndex,funding_rate} [{spot,,futures,mark,index,premiumIndex,funding_rate} ...]]
+                              [--candle-types {spot,futures,mark,index,premiumIndex,funding_rate} [{spot,futures,mark,index,premiumIndex,funding_rate} ...]]
 
 optional arguments:
   -h, --help            show this help message and exit
   -p PAIRS [PAIRS ...], --pairs PAIRS [PAIRS ...]
                         Limit command to these pairs. Pairs are space-
                         separated.
-  --format-from {json,jsongz,hdf5}
+  --format-from {json,jsongz,hdf5,feather,parquet}
                         Source format for data conversion.
-  --format-to {json,jsongz,hdf5}
+  --format-to {json,jsongz,hdf5,feather,parquet}
                         Destination format for data conversion.
   --erase               Clean all existing data for the selected
                         exchange/pairs/timeframes.
-  -t {1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} [{1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} ...], --timeframes {1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} [{1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} ...]
-                        Specify which tickers to download. Space-separated
-                        list. Default: `1m 5m`.
   --exchange EXCHANGE   Exchange name (default: `bittrex`). Only valid if no
                         config is provided.
-  --trading-mode {spot,margin,futures}
+  -t TIMEFRAMES [TIMEFRAMES ...], --timeframes TIMEFRAMES [TIMEFRAMES ...]
+                        Specify which tickers to download. Space-separated
+                        list. Default: `1m 5m`.
+  --trading-mode {spot,margin,futures}, --tradingmode {spot,margin,futures}
                         Select Trading mode
-  --candle-types {spot,,futures,mark,index,premiumIndex,funding_rate} [{spot,,futures,mark,index,premiumIndex,funding_rate} ...]
+  --candle-types {spot,futures,mark,index,premiumIndex,funding_rate} [{spot,futures,mark,index,premiumIndex,funding_rate} ...]
                         Select candle type to use
 
 Common arguments:
@@ -232,7 +283,7 @@ Common arguments:
                         `userdir/config.json` or `config.json` whichever
                         exists). Multiple --config options may be used. Can be
                         set to `-` to read config from stdin.
-  -d PATH, --datadir PATH
+  -d PATH, --datadir PATH, --data-dir PATH
                         Path to directory with historical backtesting data.
   --userdir PATH, --user-data-dir PATH
                         Path to userdata directory.
@@ -254,20 +305,24 @@ freqtrade convert-data --format-from json --format-to jsongz --datadir ~/.freqtr
 usage: freqtrade convert-trade-data [-h] [-v] [--logfile FILE] [-V] [-c PATH]
                                     [-d PATH] [--userdir PATH]
                                     [-p PAIRS [PAIRS ...]] --format-from
-                                    {json,jsongz,hdf5} --format-to
-                                    {json,jsongz,hdf5} [--erase]
+                                    {json,jsongz,hdf5,feather,parquet}
+                                    --format-to
+                                    {json,jsongz,hdf5,feather,parquet}
+                                    [--erase] [--exchange EXCHANGE]
 
 optional arguments:
   -h, --help            show this help message and exit
   -p PAIRS [PAIRS ...], --pairs PAIRS [PAIRS ...]
-                        Show profits for only these pairs. Pairs are space-
+                        Limit command to these pairs. Pairs are space-
                         separated.
-  --format-from {json,jsongz,hdf5}
+  --format-from {json,jsongz,hdf5,feather,parquet}
                         Source format for data conversion.
-  --format-to {json,jsongz,hdf5}
+  --format-to {json,jsongz,hdf5,feather,parquet}
                         Destination format for data conversion.
   --erase               Clean all existing data for the selected
                         exchange/pairs/timeframes.
+  --exchange EXCHANGE   Exchange name (default: `bittrex`). Only valid if no
+                        config is provided.
 
 Common arguments:
   -v, --verbose         Verbose mode (-vv for more, -vvv to get all messages).
@@ -280,7 +335,7 @@ Common arguments:
                         `userdir/config.json` or `config.json` whichever
                         exists). Multiple --config options may be used. Can be
                         set to `-` to read config from stdin.
-  -d PATH, --datadir PATH
+  -d PATH, --datadir PATH, --data-dir PATH
                         Path to directory with historical backtesting data.
   --userdir PATH, --user-data-dir PATH
                         Path to userdata directory.
@@ -305,9 +360,9 @@ This command will allow you to repeat this last step for additional timeframes w
 usage: freqtrade trades-to-ohlcv [-h] [-v] [--logfile FILE] [-V] [-c PATH]
                                  [-d PATH] [--userdir PATH]
                                  [-p PAIRS [PAIRS ...]]
-                                 [-t {1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} [{1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} ...]]
+                                 [-t TIMEFRAMES [TIMEFRAMES ...]]
                                  [--exchange EXCHANGE]
-                                 [--data-format-ohlcv {json,jsongz,hdf5}]
+                                 [--data-format-ohlcv {json,jsongz,hdf5,feather,parquet}]
                                  [--data-format-trades {json,jsongz,hdf5}]
 
 optional arguments:
@@ -315,12 +370,12 @@ optional arguments:
   -p PAIRS [PAIRS ...], --pairs PAIRS [PAIRS ...]
                         Limit command to these pairs. Pairs are space-
                         separated.
-  -t {1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} [{1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} ...], --timeframes {1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} [{1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,2w,1M,1y} ...]
+  -t TIMEFRAMES [TIMEFRAMES ...], --timeframes TIMEFRAMES [TIMEFRAMES ...]
                         Specify which tickers to download. Space-separated
                         list. Default: `1m 5m`.
   --exchange EXCHANGE   Exchange name (default: `bittrex`). Only valid if no
                         config is provided.
-  --data-format-ohlcv {json,jsongz,hdf5}
+  --data-format-ohlcv {json,jsongz,hdf5,feather,parquet}
                         Storage format for downloaded candle (OHLCV) data.
                         (default: `json`).
   --data-format-trades {json,jsongz,hdf5}
@@ -338,7 +393,7 @@ Common arguments:
                         `userdir/config.json` or `config.json` whichever
                         exists). Multiple --config options may be used. Can be
                         set to `-` to read config from stdin.
-  -d PATH, --datadir PATH
+  -d PATH, --datadir PATH, --data-dir PATH
                         Path to directory with historical backtesting data.
   --userdir PATH, --user-data-dir PATH
                         Path to userdata directory.
@@ -358,22 +413,25 @@ You can get a list of downloaded data using the `list-data` sub-command.
 ```
 usage: freqtrade list-data [-h] [-v] [--logfile FILE] [-V] [-c PATH] [-d PATH]
                            [--userdir PATH] [--exchange EXCHANGE]
-                           [--data-format-ohlcv {json,jsongz,hdf5}]
+                           [--data-format-ohlcv {json,jsongz,hdf5,feather,parquet}]
                            [-p PAIRS [PAIRS ...]]
                            [--trading-mode {spot,margin,futures}]
+                           [--show-timerange]
 
 optional arguments:
   -h, --help            show this help message and exit
   --exchange EXCHANGE   Exchange name (default: `bittrex`). Only valid if no
                         config is provided.
-  --data-format-ohlcv {json,jsongz,hdf5}
+  --data-format-ohlcv {json,jsongz,hdf5,feather,parquet}
                         Storage format for downloaded candle (OHLCV) data.
                         (default: `json`).
   -p PAIRS [PAIRS ...], --pairs PAIRS [PAIRS ...]
                         Limit command to these pairs. Pairs are space-
                         separated.
-  --trading-mode {spot,margin,futures}
+  --trading-mode {spot,margin,futures}, --tradingmode {spot,margin,futures}
                         Select Trading mode
+  --show-timerange      Show timerange available for available data. (May take
+                        a while to calculate).
 
 Common arguments:
   -v, --verbose         Verbose mode (-vv for more, -vvv to get all messages).
@@ -386,7 +444,7 @@ Common arguments:
                         `userdir/config.json` or `config.json` whichever
                         exists). Multiple --config options may be used. Can be
                         set to `-` to read config from stdin.
-  -d PATH, --datadir PATH
+  -d PATH, --datadir PATH, --data-dir PATH
                         Path to directory with historical backtesting data.
   --userdir PATH, --user-data-dir PATH
                         Path to userdata directory.

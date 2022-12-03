@@ -12,6 +12,7 @@
     "tradable_balance_ratio": 0.99,
     "fiat_display_currency": "{{ fiat_display_currency }}",{{ ('\n    "timeframe": "' + timeframe + '",') if timeframe else '' }}
     "dry_run": {{ dry_run | lower }},
+    "dry_run_wallet": 1000,
     "cancel_open_orders_on_exit": false,
     "trading_mode": "{{ trading_mode }}",
     "margin_mode": "{{ margin_mode }}",
@@ -66,6 +67,7 @@
         "verbosity": "error",
         "enable_openapi": false,
         "jwt_secret_key": "{{ api_server_jwt_key }}",
+        "ws_token": "{{ api_server_ws_token }}",
         "CORS_origins": [],
         "username": "{{ api_server_username }}",
         "password": "{{ api_server_password }}"

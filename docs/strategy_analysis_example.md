@@ -14,7 +14,7 @@ from freqtrade.configuration import Configuration
 
 # Initialize empty configuration object
 config = Configuration.from_files([])
-# Optionally, use existing configuration file
+# Optionally (recommended), use existing configuration file
 # config = Configuration.from_files(["config.json"])
 
 # Define some constants
@@ -22,7 +22,7 @@ config["timeframe"] = "5m"
 # Name of the strategy class
 config["strategy"] = "SampleStrategy"
 # Location of the data
-data_location = Path(config['user_data_dir'], 'data', 'binance')
+data_location = config['datadir']
 # Pair to analyze - Only use one pair here
 pair = "BTC/USDT"
 ```
@@ -31,11 +31,13 @@ pair = "BTC/USDT"
 ```python
 # Load data using values set above
 from freqtrade.data.history import load_pair_history
+from freqtrade.enums import CandleType
 
 candles = load_pair_history(datadir=data_location,
                             timeframe=config["timeframe"],
                             pair=pair,
                             data_format = "hdf5",
+                            candle_type=CandleType.SPOT,
                             )
 
 # Confirm success
@@ -230,7 +232,7 @@ graph = generate_candlestick_graph(pair=pair,
 # Show graph inline
 # graph.show()
 
-# Render graph in a seperate window
+# Render graph in a separate window
 graph.show(renderer="browser")
 
 ```

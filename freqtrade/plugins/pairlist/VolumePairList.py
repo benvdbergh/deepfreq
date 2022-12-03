@@ -4,14 +4,15 @@ Volume PairList provider
 Provides dynamic pair list based on trade volumes
 """
 import logging
-from typing import Any, Dict, List
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Literal
 
-import arrow
 from cachetools import TTLCache
 
-from freqtrade.constants import ListPairsWithTimeframes
+from freqtrade.constants import Config, ListPairsWithTimeframes
 from freqtrade.exceptions import OperationalException
-from freqtrade.exchange import timeframe_to_minutes
+from freqtrade.exchange import timeframe_to_minutes, timeframe_to_prev_date
+from freqtrade.exchange.types import Tickers
 from freqtrade.misc import format_ms_time
 from freqtrade.plugins.pairlist.IPairList import IPairList
 
@@ -25,7 +26,7 @@ SORT_VALUES = ['quoteVolume']
 class VolumePairList(IPairList):
 
     def __init__(self, exchange, pairlistmanager,
-                 config: Dict[str, Any], pairlistconfig: Dict[str, Any],
+                 config: Config, pairlistconfig: Dict[str, Any],
                  pairlist_pos: int) -> None:
         super().__init__(exchange, pairlistmanager, config, pairlistconfig, pairlist_pos)
 
@@ -36,7 +37,7 @@ class VolumePairList(IPairList):
 
         self._stake_currency = config['stake_currency']
         self._number_pairs = self._pairlistconfig['number_assets']
-        self._sort_key = self._pairlistconfig.get('sort_key', 'quoteVolume')
+        self._sort_key: Literal['quoteVolume'] = self._pairlistconfig.get('sort_key', 'quoteVolume')
         self._min_value = self._pairlistconfig.get('min_value', 0)
         self._refresh_period = self._pairlistconfig.get('refresh_period', 1800)
         self._pair_cache: TTLCache = TTLCache(maxsize=1, ttl=self._refresh_period)
@@ -73,7 +74,7 @@ class VolumePairList(IPairList):
 
         if (not self._use_range and not (
                 self._exchange.exchange_has('fetchTickers')
-                and self._exchange._ft_has["tickers_have_quoteVolume"])):
+                and self._exchange.get_option("tickers_have_quoteVolume"))):
             raise OperationalException(
                 "Exchange does not support dynamic whitelist in this configuration. "
                 "Please edit your config and either remove Volumepairlist, "
@@ -84,12 +85,13 @@ class VolumePairList(IPairList):
             raise OperationalException(
                 f'key {self._sort_key} not in {SORT_VALUES}')
 
+        candle_limit = exchange.ohlcv_candle_limit(
+            self._lookback_timeframe, self._config['candle_type_def'])
         if self._lookback_period < 0:
             raise OperationalException("VolumeFilter requires lookback_period to be >= 0")
-        if self._lookback_period > exchange.ohlcv_candle_limit(self._lookback_timeframe):
+        if self._lookback_period > candle_limit:
             raise OperationalException("VolumeFilter requires lookback_period to not "
-                                       "exceed exchange max request size "
-                                       f"({exchange.ohlcv_candle_limit(self._lookback_timeframe)})")
+                                       f"exceed exchange max request size ({candle_limit})")
 
     @property
     def needstickers(self) -> bool:
@@ -109,10 +111,10 @@ class VolumePairList(IPairList):
         """
         return f"{self.name} - top {self._pairlistconfig['number_assets']} volume pairs."
 
-    def gen_pairlist(self, tickers: Dict) -> List[str]:
+    def gen_pairlist(self, tickers: Tickers) -> List[str]:
         """
         Generate the pairlist
-        :param tickers: Tickers (from exchange.get_tickers()). May be cached.
+        :param tickers: Tickers (from exchange.get_tickers). May be cached.
         :return: List of pairs
         """
         # Generate dynamic whitelist
@@ -149,7 +151,7 @@ class VolumePairList(IPairList):
         Filters and sorts pairlist and returns the whitelist again.
         Called on each bot iteration - please use internal caching if necessary
         :param pairlist: pairlist to filter or sort
-        :param tickers: Tickers (from exchange.get_tickers()). May be cached.
+        :param tickers: Tickers (from exchange.get_tickers). May be cached.
         :return: new whitelist
         """
         if self._use_range:
@@ -157,16 +159,16 @@ class VolumePairList(IPairList):
             filtered_tickers: List[Dict[str, Any]] = [{'symbol': k} for k in pairlist]
 
             # get lookback period in ms, for exchange ohlcv fetch
-            since_ms = int(arrow.utcnow()
-                           .floor('minute')
-                           .shift(minutes=-(self._lookback_period * self._tf_in_min)
-                                  - self._tf_in_min)
-                           .int_timestamp) * 1000
+            since_ms = int(timeframe_to_prev_date(
+                self._lookback_timeframe,
+                datetime.now(timezone.utc) + timedelta(
+                    minutes=-(self._lookback_period * self._tf_in_min) - self._tf_in_min)
+                    ).timestamp()) * 1000
 
-            to_ms = int(arrow.utcnow()
-                        .floor('minute')
-                        .shift(minutes=-self._tf_in_min)
-                        .int_timestamp) * 1000
+            to_ms = int(timeframe_to_prev_date(
+                            self._lookback_timeframe,
+                            datetime.now(timezone.utc) - timedelta(minutes=self._tf_in_min)
+                            ).timestamp()) * 1000
 
             # todo: utc date output for starting date
             self.log_once(f"Using volume range of {self._lookback_period} candles, timeframe: "
@@ -185,6 +187,7 @@ class VolumePairList(IPairList):
                     needed_pairs, since_ms=since_ms, cache=False
                 )
             for i, p in enumerate(filtered_tickers):
+                contract_size = self._exchange.markets[p['symbol']].get('contractSize', 1.0) or 1.0
                 pair_candles = candles[
                     (p['symbol'], self._lookback_timeframe, self._def_candletype)
                 ] if (
@@ -192,12 +195,13 @@ class VolumePairList(IPairList):
                     ) in candles else None
                 # in case of candle data calculate typical price and quoteVolume for candle
                 if pair_candles is not None and not pair_candles.empty:
-                    if self._exchange._ft_has["ohlcv_volume_currency"] == "base":
+                    if self._exchange.get_option("ohlcv_volume_currency") == "base":
                         pair_candles['typical_price'] = (pair_candles['high'] + pair_candles['low']
                                                          + pair_candles['close']) / 3
 
                         pair_candles['quoteVolume'] = (
                             pair_candles['volume'] * pair_candles['typical_price']
+                            * contract_size
                         )
                     else:
                         # Exchange ohlcv data is in quote volume already.
@@ -228,7 +232,5 @@ class VolumePairList(IPairList):
         pairs = self.verify_blacklist(pairs, logmethod=logger.info)
         # Limit pairlist to the requested number of pairs
         pairs = pairs[:self._number_pairs]
-
-        self.log_once(f"Searching {self._number_pairs} pairs: {pairs}", logger.info)
 
         return pairs

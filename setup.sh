@@ -25,7 +25,7 @@ function check_installed_python() {
         exit 2
     fi
 
-    for v in 9 10 8
+    for v in 10 9 8
     do
         PYTHON="python3.${v}"
         which $PYTHON
@@ -77,7 +77,22 @@ function updateenv() {
         fi
     fi
 
-    ${PYTHON} -m pip install --upgrade -r ${REQUIREMENTS} ${REQUIREMENTS_HYPEROPT} ${REQUIREMENTS_PLOT}
+    REQUIREMENTS_FREQAI=""
+    REQUIREMENTS_FREQAI_RL=""
+    read -p "Do you want to install dependencies for freqai [y/N]? "
+    dev=$REPLY
+    if [[ $REPLY =~ ^[Yy]$ ]]
+    then
+        REQUIREMENTS_FREQAI="-r requirements-freqai.txt --use-pep517"
+        read -p "Do you also want dependencies for freqai-rl (~700mb additional space required) [y/N]? "
+        dev=$REPLY
+        if [[ $REPLY =~ ^[Yy]$ ]]
+        then
+            REQUIREMENTS_FREQAI="-r requirements-freqai-rl.txt"
+        fi
+    fi
+
+    ${PYTHON} -m pip install --upgrade -r ${REQUIREMENTS} ${REQUIREMENTS_HYPEROPT} ${REQUIREMENTS_PLOT} ${REQUIREMENTS_FREQAI} ${REQUIREMENTS_FREQAI_RL}
     if [ $? -ne 0 ]; then
         echo "Failed installing dependencies"
         exit 1
@@ -87,10 +102,14 @@ function updateenv() {
         echo "Failed installing Freqtrade"
         exit 1
     fi
+
+    echo "Installing freqUI"
+    freqtrade install-ui
+
     echo "pip install completed"
     echo
     if [[ $dev =~ ^[Yy]$ ]]; then
-        ${PYTHON} -m pre-commit install
+        ${PYTHON} -m pre_commit install
         if [ $? -ne 0 ]; then
             echo "Failed installing pre-commit"
             exit 1
@@ -155,7 +174,7 @@ function install_macos() {
 # Install bot Debian_ubuntu
 function install_debian() {
     sudo apt-get update
-    sudo apt-get install -y gcc build-essential autoconf libtool pkg-config make wget git $(echo lib${PYTHON}-dev ${PYTHON}-venv)
+    sudo apt-get install -y gcc build-essential autoconf libtool pkg-config make wget git curl $(echo lib${PYTHON}-dev ${PYTHON}-venv)
     install_talib
 }
 

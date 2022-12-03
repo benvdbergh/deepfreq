@@ -9,10 +9,15 @@ user_data/*
 !user_data/pairs.json
 !user_data/hyperopts
 !user_data/notebooks
+!user_data/models
+!user_data/freqaimodels
+user_data/freqaimodels/*
+user_data/models/*
 user_data/notebooks/*
 freqtrade-plot.html
 freqtrade-profit-plot.html
 freqtrade/rpc/api_server/ui/*
+build_helpers/ta-lib/*
 
 # Macos related
 .DS_Store
@@ -82,6 +87,8 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+# Mkdocs documentation
+site/
 
 # PyBuilder
 target/
@@ -107,6 +114,6 @@ target/
 !*.gitkeep
 !config_examples/config_binance.example.json
 !config_examples/config_bittrex.example.json
-!config_examples/config_ftx.example.json
 !config_examples/config_full.example.json
 !config_examples/config_kraken.example.json
+!config_examples/config_freqai.example.json

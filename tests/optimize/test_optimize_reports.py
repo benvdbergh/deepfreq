@@ -1,7 +1,9 @@
 import re
 from datetime import timedelta
 from pathlib import Path
+from shutil import copyfile
 
+import joblib
 import pandas as pd
 import pytest
 from arrow import Arrow
@@ -19,11 +21,27 @@ from freqtrade.optimize.optimize_reports import (_get_resample_from_period, gene
                                                  generate_periodic_breakdown_stats,
                                                  generate_strategy_comparison,
                                                  generate_trading_stats, show_sorted_pairlist,
+                                                 store_backtest_signal_candles,
                                                  store_backtest_stats, text_table_bt_results,
                                                  text_table_exit_reason, text_table_strategy)
 from freqtrade.resolvers.strategy_resolver import StrategyResolver
 from tests.conftest import CURRENT_TEST_STRATEGY
-from tests.data.test_history import _backup_file, _clean_test_file
+from tests.data.test_history import _clean_test_file
+
+
+def _backup_file(file: Path, copy_file: bool = False) -> None:
+    """
+    Backup existing file to avoid deleting the user file
+    :param file: complete path to the file
+    :param copy_file: keep file in place too.
+    :return: None
+    """
+    file_swp = str(file) + '.swp'
+    if file.is_file():
+        file.rename(file_swp)
+
+        if copy_file:
+            copyfile(file_swp, file)
 
 
 def test_text_table_bt_results():
@@ -38,14 +56,14 @@ def test_text_table_bt_results():
     )
 
     result_str = (
-        '|    Pair |   Buys |   Avg Profit % |   Cum Profit % |   Tot Profit BTC |   Tot Profit % |'
-        '   Avg Duration |   Win  Draw  Loss  Win% |\n'
-        '|---------+--------+----------------+----------------+------------------+----------------+'
-        '----------------+-------------------------|\n'
-        '| ETH/BTC |      3 |           8.33 |          25.00 |       0.50000000 |          12.50 |'
-        '        0:20:00 |     2     0     1  66.7 |\n'
-        '|   TOTAL |      3 |           8.33 |          25.00 |       0.50000000 |          12.50 |'
-        '        0:20:00 |     2     0     1  66.7 |'
+        '|    Pair |   Entries |   Avg Profit % |   Cum Profit % |   Tot Profit BTC |   '
+        'Tot Profit % |   Avg Duration |   Win  Draw  Loss  Win% |\n'
+        '|---------+-----------+----------------+----------------+------------------+'
+        '----------------+----------------+-------------------------|\n'
+        '| ETH/BTC |         3 |           8.33 |          25.00 |       0.50000000 |          '
+        '12.50 |        0:20:00 |     2     0     1  66.7 |\n'
+        '|   TOTAL |         3 |           8.33 |          25.00 |       0.50000000 |          '
+        '12.50 |        0:20:00 |     2     0     1  66.7 |'
     )
 
     pair_results = generate_pair_metrics(['ETH/BTC'], stake_currency='BTC',
@@ -85,6 +103,9 @@ def test_generate_backtest_stats(default_conf, testdatadir, tmpdir):
         'rejected_signals': 20,
         'timedout_entry_orders': 0,
         'timedout_exit_orders': 0,
+        'canceled_trade_entries': 0,
+        'canceled_entry_orders': 0,
+        'replaced_entry_orders': 0,
         'backtest_start_time': Arrow.utcnow().int_timestamp,
         'backtest_end_time': Arrow.utcnow().int_timestamp,
         'run_id': '123',
@@ -137,6 +158,9 @@ def test_generate_backtest_stats(default_conf, testdatadir, tmpdir):
         'rejected_signals': 20,
         'timedout_entry_orders': 0,
         'timedout_exit_orders': 0,
+        'canceled_trade_entries': 0,
+        'canceled_entry_orders': 0,
+        'replaced_entry_orders': 0,
         'backtest_start_time': Arrow.utcnow().int_timestamp,
         'backtest_end_time': Arrow.utcnow().int_timestamp,
         'run_id': '124',
@@ -163,7 +187,7 @@ def test_generate_backtest_stats(default_conf, testdatadir, tmpdir):
     _backup_file(filename_last, copy_file=True)
     assert not filename.is_file()
 
-    store_backtest_stats(filename, stats)
+    store_backtest_stats(filename, stats, '2022_01_01_15_05_13')
 
     # get real Filename (it's btresult-<date>.json)
     last_fn = get_latest_backtest_filename(filename_last.parent)
@@ -186,7 +210,7 @@ def test_store_backtest_stats(testdatadir, mocker):
 
     dump_mock = mocker.patch('freqtrade.optimize.optimize_reports.file_dump_json')
 
-    store_backtest_stats(testdatadir, {'metadata': {}})
+    store_backtest_stats(testdatadir, {'metadata': {}}, '2022_01_01_15_05_13')
 
     assert dump_mock.call_count == 3
     assert isinstance(dump_mock.call_args_list[0][0][0], Path)
@@ -194,11 +218,67 @@ def test_store_backtest_stats(testdatadir, mocker):
 
     dump_mock.reset_mock()
     filename = testdatadir / 'testresult.json'
-    store_backtest_stats(filename, {'metadata': {}})
+    store_backtest_stats(filename, {'metadata': {}}, '2022_01_01_15_05_13')
     assert dump_mock.call_count == 3
     assert isinstance(dump_mock.call_args_list[0][0][0], Path)
     # result will be testdatadir / testresult-<timestamp>.json
     assert str(dump_mock.call_args_list[0][0][0]).startswith(str(testdatadir / 'testresult'))
+
+
+def test_store_backtest_candles(testdatadir, mocker):
+
+    dump_mock = mocker.patch('freqtrade.optimize.optimize_reports.file_dump_joblib')
+
+    candle_dict = {'DefStrat': {'UNITTEST/BTC': pd.DataFrame()}}
+
+    # mock directory exporting
+    store_backtest_signal_candles(testdatadir, candle_dict, '2022_01_01_15_05_13')
+
+    assert dump_mock.call_count == 1
+    assert isinstance(dump_mock.call_args_list[0][0][0], Path)
+    assert str(dump_mock.call_args_list[0][0][0]).endswith(str('_signals.pkl'))
+
+    dump_mock.reset_mock()
+    # mock file exporting
+    filename = Path(testdatadir / 'testresult')
+    store_backtest_signal_candles(filename, candle_dict, '2022_01_01_15_05_13')
+    assert dump_mock.call_count == 1
+    assert isinstance(dump_mock.call_args_list[0][0][0], Path)
+    # result will be testdatadir / testresult-<timestamp>_signals.pkl
+    assert str(dump_mock.call_args_list[0][0][0]).endswith(str('_signals.pkl'))
+    dump_mock.reset_mock()
+
+
+def test_write_read_backtest_candles(tmpdir):
+
+    candle_dict = {'DefStrat': {'UNITTEST/BTC': pd.DataFrame()}}
+
+    # test directory exporting
+    stored_file = store_backtest_signal_candles(Path(tmpdir), candle_dict, '2022_01_01_15_05_13')
+    scp = open(stored_file, "rb")
+    pickled_signal_candles = joblib.load(scp)
+    scp.close()
+
+    assert pickled_signal_candles.keys() == candle_dict.keys()
+    assert pickled_signal_candles['DefStrat'].keys() == pickled_signal_candles['DefStrat'].keys()
+    assert pickled_signal_candles['DefStrat']['UNITTEST/BTC'] \
+        .equals(pickled_signal_candles['DefStrat']['UNITTEST/BTC'])
+
+    _clean_test_file(stored_file)
+
+    # test file exporting
+    filename = Path(tmpdir / 'testresult')
+    stored_file = store_backtest_signal_candles(filename, candle_dict, '2022_01_01_15_05_13')
+    scp = open(stored_file, "rb")
+    pickled_signal_candles = joblib.load(scp)
+    scp.close()
+
+    assert pickled_signal_candles.keys() == candle_dict.keys()
+    assert pickled_signal_candles['DefStrat'].keys() == pickled_signal_candles['DefStrat'].keys()
+    assert pickled_signal_candles['DefStrat']['UNITTEST/BTC'] \
+        .equals(pickled_signal_candles['DefStrat']['UNITTEST/BTC'])
+
+    _clean_test_file(stored_file)
 
 
 def test_generate_pair_metrics():
@@ -338,13 +418,13 @@ def test_text_table_strategy(testdatadir):
     bt_res_data_comparison = bt_res_data.pop('strategy_comparison')
 
     result_str = (
-        '|       Strategy |   Buys |   Avg Profit % |   Cum Profit % |   Tot Profit BTC |'
+        '|       Strategy |   Entries |   Avg Profit % |   Cum Profit % |   Tot Profit BTC |'
         '   Tot Profit % |   Avg Duration |   Win  Draw  Loss  Win% |              Drawdown |\n'
-        '|----------------+--------+----------------+----------------+------------------+'
+        '|----------------+-----------+----------------+----------------+------------------+'
         '----------------+----------------+-------------------------+-----------------------|\n'
-        '| StrategyTestV2 |    179 |           0.08 |          14.39 |       0.02608550 |'
+        '| StrategyTestV2 |       179 |           0.08 |          14.39 |       0.02608550 |'
         '         260.85 |        3:40:00 |   170     0     9  95.0 | 0.00308222 BTC  8.67% |\n'
-        '|   TestStrategy |    179 |           0.08 |          14.39 |       0.02608550 |'
+        '|   TestStrategy |       179 |           0.08 |          14.39 |       0.02608550 |'
         '         260.85 |        3:40:00 |   170     0     9  95.0 | 0.00308222 BTC  8.67% |'
     )
 

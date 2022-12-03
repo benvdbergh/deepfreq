@@ -22,10 +22,6 @@ Freqtrade is a free and open source crypto trading bot written in Python. It is 
 
 ![freqtrade screenshot](assets/freqtrade-screenshot.png)
 
-## Sponsored promotion
-
-[![tokenbot-promo](assets/TokenBot-Freqtrade-banner.png)](https://tokenbot.com/?utm_source=github&utm_medium=freqtrade&utm_campaign=algodevs)
-
 ## Features
 
 - Develop your Strategy: Write your strategy in python, using [pandas](https://pandas.pydata.org/). Example strategies to inspire you are available in the [strategy repository](https://github.com/freqtrade/freqtrade-strategies).
@@ -36,7 +32,7 @@ Freqtrade is a free and open source crypto trading bot written in Python. It is 
 - Run: Test your strategy with simulated money (Dry-Run mode) or deploy it with real money (Live-Trade mode).
 - Run using Edge (optional module): The concept is to find the best historical [trade expectancy](edge.md#expectancy) by markets based on variation of the stop-loss and then allow/reject markets to trade. The sizing of the trade is based on a risk of a percentage of your capital.
 - Control/Monitor: Use Telegram or a WebUI (start/stop the bot, show profit/loss, daily summary, current open trades results, etc.).
-- Analyse: Further analysis can be performed on either Backtesting data or Freqtrade trading history (SQL database), including automated standard plots, and methods to load the data into [interactive environments](data-analysis.md).
+- Analyze: Further analysis can be performed on either Backtesting data or Freqtrade trading history (SQL database), including automated standard plots, and methods to load the data into [interactive environments](data-analysis.md).
 
 ## Supported exchange marketplaces
 
@@ -44,12 +40,19 @@ Please read the [exchange specific notes](exchanges.md) to learn about eventual,
 
 - [X] [Binance](https://www.binance.com/)
 - [X] [Bittrex](https://bittrex.com/)
-- [X] [FTX](https://ftx.com/#a=2258149)
 - [X] [Gate.io](https://www.gate.io/ref/6266643)
 - [X] [Huobi](http://huobi.com/)
 - [X] [Kraken](https://kraken.com/)
 - [X] [OKX](https://okx.com/) (Former OKEX)
 - [ ] [potentially many others through <img alt="ccxt" width="30px" src="assets/ccxt-logo.svg" />](https://github.com/ccxt/ccxt/). _(We cannot guarantee they will work)_
+
+### Supported Futures Exchanges (experimental)
+
+- [X] [Binance](https://www.binance.com/)
+- [X] [Gate.io](https://www.gate.io/ref/6266643)
+- [X] [OKX](https://okx.com/)
+
+Please make sure to read the [exchange specific notes](exchanges.md), as well as the [trading with leverage](leverage.md) documentation before diving in.
 
 ### Community tested
 

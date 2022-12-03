@@ -6,6 +6,8 @@ from typing import Any, Dict, List
 
 import pandas as pd
 
+from freqtrade.constants import Config
+from freqtrade.exchange.types import Tickers
 from freqtrade.persistence import Trade
 from freqtrade.plugins.pairlist.IPairList import IPairList
 
@@ -16,12 +18,12 @@ logger = logging.getLogger(__name__)
 class PerformanceFilter(IPairList):
 
     def __init__(self, exchange, pairlistmanager,
-                 config: Dict[str, Any], pairlistconfig: Dict[str, Any],
+                 config: Config, pairlistconfig: Dict[str, Any],
                  pairlist_pos: int) -> None:
         super().__init__(exchange, pairlistmanager, config, pairlistconfig, pairlist_pos)
 
         self._minutes = pairlistconfig.get('minutes', 0)
-        self._min_profit = pairlistconfig.get('min_profit', None)
+        self._min_profit = pairlistconfig.get('min_profit')
 
     @property
     def needstickers(self) -> bool:
@@ -38,12 +40,12 @@ class PerformanceFilter(IPairList):
         """
         return f"{self.name} - Sorting pairs by performance."
 
-    def filter_pairlist(self, pairlist: List[str], tickers: Dict) -> List[str]:
+    def filter_pairlist(self, pairlist: List[str], tickers: Tickers) -> List[str]:
         """
         Filters and sorts pairlist and returns the allowlist again.
         Called on each bot iteration - please use internal caching if necessary
         :param pairlist: pairlist to filter or sort
-        :param tickers: Tickers (from exchange.get_tickers()). May be cached.
+        :param tickers: Tickers (from exchange.get_tickers). May be cached.
         :return: new allowlist
         """
         # Get the trading performance for pairs from database

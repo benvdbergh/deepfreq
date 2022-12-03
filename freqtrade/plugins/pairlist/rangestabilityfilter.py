@@ -9,8 +9,9 @@ import arrow
 from cachetools import TTLCache
 from pandas import DataFrame
 
-from freqtrade.constants import ListPairsWithTimeframes
+from freqtrade.constants import Config, ListPairsWithTimeframes
 from freqtrade.exceptions import OperationalException
+from freqtrade.exchange.types import Tickers
 from freqtrade.misc import plural
 from freqtrade.plugins.pairlist.IPairList import IPairList
 
@@ -21,24 +22,24 @@ logger = logging.getLogger(__name__)
 class RangeStabilityFilter(IPairList):
 
     def __init__(self, exchange, pairlistmanager,
-                 config: Dict[str, Any], pairlistconfig: Dict[str, Any],
+                 config: Config, pairlistconfig: Dict[str, Any],
                  pairlist_pos: int) -> None:
         super().__init__(exchange, pairlistmanager, config, pairlistconfig, pairlist_pos)
 
         self._days = pairlistconfig.get('lookback_days', 10)
         self._min_rate_of_change = pairlistconfig.get('min_rate_of_change', 0.01)
-        self._max_rate_of_change = pairlistconfig.get('max_rate_of_change', None)
+        self._max_rate_of_change = pairlistconfig.get('max_rate_of_change')
         self._refresh_period = pairlistconfig.get('refresh_period', 1440)
         self._def_candletype = self._config['candle_type_def']
 
         self._pair_cache: TTLCache = TTLCache(maxsize=1000, ttl=self._refresh_period)
 
+        candle_limit = exchange.ohlcv_candle_limit('1d', self._config['candle_type_def'])
         if self._days < 1:
             raise OperationalException("RangeStabilityFilter requires lookback_days to be >= 1")
-        if self._days > exchange.ohlcv_candle_limit('1d'):
+        if self._days > candle_limit:
             raise OperationalException("RangeStabilityFilter requires lookback_days to not "
-                                       "exceed exchange max request size "
-                                       f"({exchange.ohlcv_candle_limit('1d')})")
+                                       f"exceed exchange max request size ({candle_limit})")
 
     @property
     def needstickers(self) -> bool:
@@ -60,11 +61,11 @@ class RangeStabilityFilter(IPairList):
                 f"{self._min_rate_of_change}{max_rate_desc} over the "
                 f"last {plural(self._days, 'day')}.")
 
-    def filter_pairlist(self, pairlist: List[str], tickers: Dict) -> List[str]:
+    def filter_pairlist(self, pairlist: List[str], tickers: Tickers) -> List[str]:
         """
         Validate trading range
         :param pairlist: pairlist to filter or sort
-        :param tickers: Tickers (from exchange.get_tickers()). May be cached.
+        :param tickers: Tickers (from exchange.get_tickers). May be cached.
         :return: new allowlist
         """
         needed_pairs: ListPairsWithTimeframes = [
@@ -100,23 +101,19 @@ class RangeStabilityFilter(IPairList):
         if cached_res is not None:
             return cached_res
 
-        result = False
+        result = True
         if daily_candles is not None and not daily_candles.empty:
             highest_high = daily_candles['high'].max()
             lowest_low = daily_candles['low'].min()
             pct_change = ((highest_high - lowest_low) / lowest_low) if lowest_low > 0 else 0
-            if pct_change >= self._min_rate_of_change:
-                result = True
-            else:
+            if pct_change < self._min_rate_of_change:
                 self.log_once(f"Removed {pair} from whitelist, because rate of change "
                               f"over {self._days} {plural(self._days, 'day')} is {pct_change:.3f}, "
                               f"which is below the threshold of {self._min_rate_of_change}.",
                               logger.info)
                 result = False
             if self._max_rate_of_change:
-                if pct_change <= self._max_rate_of_change:
-                    result = True
-                else:
+                if pct_change > self._max_rate_of_change:
                     self.log_once(
                         f"Removed {pair} from whitelist, because rate of change "
                         f"over {self._days} {plural(self._days, 'day')} is {pct_change:.3f}, "

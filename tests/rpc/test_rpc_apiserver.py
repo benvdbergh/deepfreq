@@ -3,6 +3,8 @@ Unit test file for rpc/api_server.py
 """
 
 import json
+import logging
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, PropertyMock
@@ -10,10 +12,9 @@ from unittest.mock import ANY, MagicMock, PropertyMock
 import pandas as pd
 import pytest
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocketDisconnect
 from fastapi.exceptions import HTTPException
 from fastapi.testclient import TestClient
-from numpy import isnan
 from requests.auth import _basic_auth_str
 
 from freqtrade.__init__ import __version__
@@ -32,6 +33,7 @@ from tests.conftest import (CURRENT_TEST_STRATEGY, create_mock_trades, get_mock_
 BASE_URI = "/api/v1"
 _TEST_USER = "FreqTrader"
 _TEST_PASS = "SuperSecurePassword1!"
+_TEST_WS_TOKEN = "secret_Ws_t0ken"
 
 
 @pytest.fixture
@@ -45,23 +47,30 @@ def botclient(default_conf, mocker):
                                         "CORS_origins": ['http://example.com'],
                                         "username": _TEST_USER,
                                         "password": _TEST_PASS,
+                                        "ws_token": _TEST_WS_TOKEN
                                         }})
 
     ftbot = get_patched_freqtradebot(mocker, default_conf)
     rpc = RPC(ftbot)
     mocker.patch('freqtrade.rpc.api_server.ApiServer.start_api', MagicMock())
+    apiserver = None
     try:
         apiserver = ApiServer(default_conf)
         apiserver.add_rpc_handler(rpc)
-        yield ftbot, TestClient(apiserver.app)
+        # We need to use the TestClient as a context manager to
+        # handle lifespan events correctly
+        with TestClient(apiserver.app) as client:
+            yield ftbot, client
         # Cleanup ... ?
     finally:
+        if apiserver:
+            apiserver.cleanup()
         ApiServer.shutdown()
 
 
 def client_post(client, url, data={}):
     return client.post(url,
-                       data=data,
+                       content=data,
                        headers={'Authorization': _basic_auth_str(_TEST_USER, _TEST_PASS),
                                 'Origin': 'http://example.com',
                                 'content-type': 'application/json'
@@ -110,6 +119,9 @@ def test_api_ui_fallback(botclient, mocker):
     rc = client_get(client, "/something")
     assert rc.status_code == 200
 
+    rc = client_get(client, "/something.js")
+    assert rc.status_code == 200
+
     # Test directory traversal without mock
     rc = client_get(client, '%2F%2F%2Fetc/passwd')
     assert rc.status_code == 200
@@ -150,6 +162,25 @@ def test_api_auth():
 
     with pytest.raises(HTTPException):
         get_user_from_token(b'not_a_token', 'secret1234')
+
+
+def test_api_ws_auth(botclient):
+    ftbot, client = botclient
+    def url(token): return f"/api/v1/message/ws?token={token}"
+
+    bad_token = "bad-ws_token"
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(url(bad_token)) as websocket:
+            websocket.receive()
+
+    good_token = _TEST_WS_TOKEN
+    with client.websocket_connect(url(good_token)) as websocket:
+        pass
+
+    jwt_secret = ftbot.config['api_server'].get('jwt_secret_key', 'super-secret')
+    jwt_token = create_token({'identity': {'u': 'Freqtrade'}}, jwt_secret)
+    with client.websocket_connect(url(jwt_token)) as websocket:
+        pass
 
 
 def test_api_unauthorized(botclient):
@@ -259,6 +290,7 @@ def test_api__init__(default_conf, mocker):
     with pytest.raises(OperationalException, match="RPC Handler already attached."):
         apiserver.add_rpc_handler(RPC(get_patched_freqtradebot(mocker, default_conf)))
 
+    apiserver.cleanup()
     ApiServer.shutdown()
 
 
@@ -386,6 +418,7 @@ def test_api_run(default_conf, mocker, caplog):
                  MagicMock(side_effect=Exception))
     apiserver.start_api()
     assert log_has("Api server failed to start.", caplog)
+    apiserver.cleanup()
     ApiServer.shutdown()
 
 
@@ -420,13 +453,20 @@ def test_api_reloadconf(botclient):
     assert ftbot.state == State.RELOAD_CONFIG
 
 
-def test_api_stopbuy(botclient):
+def test_api_stopentry(botclient):
     ftbot, client = botclient
     assert ftbot.config['max_open_trades'] != 0
 
     rc = client_post(client, f"{BASE_URI}/stopbuy")
     assert_response(rc)
-    assert rc.json() == {'status': 'No more buy will occur from now. Run /reload_config to reset.'}
+    assert rc.json() == {
+        'status': 'No more entries will occur from now. Run /reload_config to reset.'}
+    assert ftbot.config['max_open_trades'] == 0
+
+    rc = client_post(client, f"{BASE_URI}/stopentry")
+    assert_response(rc)
+    assert rc.json() == {
+        'status': 'No more entries will occur from now. Run /reload_config to reset.'}
     assert ftbot.config['max_open_trades'] == 0
 
 
@@ -579,9 +619,10 @@ def test_api_trades(botclient, mocker, fee, markets, is_short):
     )
     rc = client_get(client, f"{BASE_URI}/trades")
     assert_response(rc)
-    assert len(rc.json()) == 3
+    assert len(rc.json()) == 4
     assert rc.json()['trades_count'] == 0
     assert rc.json()['total_trades'] == 0
+    assert rc.json()['offset'] == 0
 
     create_mock_trades(fee, is_short=is_short)
     Trade.query.session.flush()
@@ -717,41 +758,47 @@ def test_api_edge_disabled(botclient, mocker, ticker, fee, markets):
     (
         True,
         {'best_pair': 'ETC/BTC', 'best_rate': -0.5, 'best_pair_profit_ratio': -0.005,
-         'profit_all_coin': 43.61269123,
-         'profit_all_fiat': 538398.67323435, 'profit_all_percent_mean': 66.41,
+         'profit_all_coin': 45.561959,
+         'profit_all_fiat': 562462.39126200, 'profit_all_percent_mean': 66.41,
          'profit_all_ratio_mean': 0.664109545, 'profit_all_percent_sum': 398.47,
-         'profit_all_ratio_sum': 3.98465727, 'profit_all_percent': 4.36,
-         'profit_all_ratio': 0.043612222872799825, 'profit_closed_coin': -0.00673913,
+         'profit_all_ratio_sum': 3.98465727, 'profit_all_percent': 4.56,
+         'profit_all_ratio': 0.04556147, 'profit_closed_coin': -0.00673913,
          'profit_closed_fiat': -83.19455985, 'profit_closed_ratio_mean': -0.0075,
          'profit_closed_percent_mean': -0.75, 'profit_closed_ratio_sum': -0.015,
          'profit_closed_percent_sum': -1.5, 'profit_closed_ratio': -6.739057628404269e-06,
-         'profit_closed_percent': -0.0, 'winning_trades': 0, 'losing_trades': 2}
+         'profit_closed_percent': -0.0, 'winning_trades': 0, 'losing_trades': 2,
+         'profit_factor': 0.0, 'trading_volume': 91.074,
+         }
     ),
     (
         False,
         {'best_pair': 'XRP/BTC', 'best_rate': 1.0, 'best_pair_profit_ratio': 0.01,
-         'profit_all_coin': -44.0631579,
-         'profit_all_fiat': -543959.6842755, 'profit_all_percent_mean': -66.41,
+         'profit_all_coin': -45.79641127,
+         'profit_all_fiat': -565356.69712815, 'profit_all_percent_mean': -66.41,
          'profit_all_ratio_mean': -0.6641100666666667, 'profit_all_percent_sum': -398.47,
-         'profit_all_ratio_sum': -3.9846604, 'profit_all_percent': -4.41,
-         'profit_all_ratio': -0.044063014216106644, 'profit_closed_coin': 0.00073913,
+         'profit_all_ratio_sum': -3.9846604, 'profit_all_percent': -4.58,
+         'profit_all_ratio': -0.045796261934205953, 'profit_closed_coin': 0.00073913,
          'profit_closed_fiat': 9.124559849999999, 'profit_closed_ratio_mean': 0.0075,
          'profit_closed_percent_mean': 0.75, 'profit_closed_ratio_sum': 0.015,
          'profit_closed_percent_sum': 1.5, 'profit_closed_ratio': 7.391275897987988e-07,
-         'profit_closed_percent': 0.0, 'winning_trades': 2, 'losing_trades': 0}
+         'profit_closed_percent': 0.0, 'winning_trades': 2, 'losing_trades': 0,
+         'profit_factor': None, 'trading_volume': 91.074,
+         }
     ),
     (
         None,
         {'best_pair': 'XRP/BTC', 'best_rate': 1.0, 'best_pair_profit_ratio': 0.01,
-         'profit_all_coin': -14.43790415,
-         'profit_all_fiat': -178235.92673175, 'profit_all_percent_mean': 0.08,
+         'profit_all_coin': -14.94732578,
+         'profit_all_fiat': -184524.7367541, 'profit_all_percent_mean': 0.08,
          'profit_all_ratio_mean': 0.000835751666666662, 'profit_all_percent_sum': 0.5,
-         'profit_all_ratio_sum': 0.005014509999999972, 'profit_all_percent': -1.44,
-         'profit_all_ratio': -0.014437768014451796, 'profit_closed_coin': -0.00542913,
+         'profit_all_ratio_sum': 0.005014509999999972, 'profit_all_percent': -1.49,
+         'profit_all_ratio': -0.014947184841095841, 'profit_closed_coin': -0.00542913,
          'profit_closed_fiat': -67.02260985, 'profit_closed_ratio_mean': 0.0025,
          'profit_closed_percent_mean': 0.25, 'profit_closed_ratio_sum': 0.005,
          'profit_closed_percent_sum': 0.5, 'profit_closed_ratio': -5.429078808526421e-06,
-         'profit_closed_percent': -0.0, 'winning_trades': 1, 'losing_trades': 1}
+         'profit_closed_percent': -0.0, 'winning_trades': 1, 'losing_trades': 1,
+         'profit_factor': 0.02775724835771106, 'trading_volume': 91.074,
+         }
     )
 ])
 def test_api_profit(botclient, mocker, ticker, fee, markets, is_short, expected):
@@ -784,26 +831,30 @@ def test_api_profit(botclient, mocker, ticker, fee, markets, is_short, expected)
         'first_trade_timestamp': ANY,
         'latest_trade_date': '5 minutes ago',
         'latest_trade_timestamp': ANY,
-        'profit_all_coin': expected['profit_all_coin'],
-        'profit_all_fiat': expected['profit_all_fiat'],
-        'profit_all_percent_mean': expected['profit_all_percent_mean'],
-        'profit_all_ratio_mean': expected['profit_all_ratio_mean'],
-        'profit_all_percent_sum': expected['profit_all_percent_sum'],
-        'profit_all_ratio_sum': expected['profit_all_ratio_sum'],
-        'profit_all_percent': expected['profit_all_percent'],
-        'profit_all_ratio': expected['profit_all_ratio'],
-        'profit_closed_coin': expected['profit_closed_coin'],
-        'profit_closed_fiat': expected['profit_closed_fiat'],
-        'profit_closed_ratio_mean': expected['profit_closed_ratio_mean'],
-        'profit_closed_percent_mean': expected['profit_closed_percent_mean'],
-        'profit_closed_ratio_sum': expected['profit_closed_ratio_sum'],
-        'profit_closed_percent_sum': expected['profit_closed_percent_sum'],
-        'profit_closed_ratio': expected['profit_closed_ratio'],
-        'profit_closed_percent': expected['profit_closed_percent'],
+        'profit_all_coin': pytest.approx(expected['profit_all_coin']),
+        'profit_all_fiat': pytest.approx(expected['profit_all_fiat']),
+        'profit_all_percent_mean': pytest.approx(expected['profit_all_percent_mean']),
+        'profit_all_ratio_mean': pytest.approx(expected['profit_all_ratio_mean']),
+        'profit_all_percent_sum': pytest.approx(expected['profit_all_percent_sum']),
+        'profit_all_ratio_sum': pytest.approx(expected['profit_all_ratio_sum']),
+        'profit_all_percent': pytest.approx(expected['profit_all_percent']),
+        'profit_all_ratio': pytest.approx(expected['profit_all_ratio']),
+        'profit_closed_coin': pytest.approx(expected['profit_closed_coin']),
+        'profit_closed_fiat': pytest.approx(expected['profit_closed_fiat']),
+        'profit_closed_ratio_mean': pytest.approx(expected['profit_closed_ratio_mean']),
+        'profit_closed_percent_mean': pytest.approx(expected['profit_closed_percent_mean']),
+        'profit_closed_ratio_sum': pytest.approx(expected['profit_closed_ratio_sum']),
+        'profit_closed_percent_sum': pytest.approx(expected['profit_closed_percent_sum']),
+        'profit_closed_ratio': pytest.approx(expected['profit_closed_ratio']),
+        'profit_closed_percent': pytest.approx(expected['profit_closed_percent']),
         'trade_count': 6,
         'closed_trade_count': 2,
         'winning_trades': expected['winning_trades'],
         'losing_trades': expected['losing_trades'],
+        'profit_factor': expected['profit_factor'],
+        'max_drawdown': ANY,
+        'max_drawdown_abs': ANY,
+        'trading_volume': expected['trading_volume'],
     }
 
 
@@ -853,8 +904,8 @@ def test_api_performance(botclient, fee):
         close_rate=0.265441,
 
     )
-    trade.close_profit = trade.calc_profit_ratio()
-    trade.close_profit_abs = trade.calc_profit()
+    trade.close_profit = trade.calc_profit_ratio(trade.close_rate)
+    trade.close_profit_abs = trade.calc_profit(trade.close_rate)
     Trade.query.session.add(trade)
 
     trade = Trade(
@@ -869,8 +920,8 @@ def test_api_performance(botclient, fee):
         fee_open=fee.return_value,
         close_rate=0.391
     )
-    trade.close_profit = trade.calc_profit_ratio()
-    trade.close_profit_abs = trade.calc_profit()
+    trade.close_profit = trade.calc_profit_ratio(trade.close_rate)
+    trade.close_profit_abs = trade.calc_profit(trade.close_rate)
 
     Trade.query.session.add(trade)
     Trade.commit()
@@ -879,7 +930,7 @@ def test_api_performance(botclient, fee):
     assert_response(rc)
     assert len(rc.json()) == 2
     assert rc.json() == [{'count': 1, 'pair': 'LTC/ETH', 'profit': 7.61, 'profit_pct': 7.61,
-                          'profit_ratio': 0.07609203, 'profit_abs': 0.01872279},
+                          'profit_ratio': 0.07609203, 'profit_abs': 0.0187228},
                          {'count': 1, 'pair': 'XRP/ETH', 'profit': -5.57, 'profit_pct': -5.57,
                           'profit_ratio': -0.05570419, 'profit_abs': -0.1150375}]
 
@@ -973,6 +1024,7 @@ def test_api_status(botclient, mocker, ticker, fee, markets, is_short,
         'exchange': 'binance',
         'leverage': 1.0,
         'interest_rate': 0.0,
+        'liquidation_price': None,
         'funding_fees': None,
         'trading_mode': ANY,
         'orders': [ANY],
@@ -985,7 +1037,7 @@ def test_api_status(botclient, mocker, ticker, fee, markets, is_short,
     assert_response(rc)
     resp_values = rc.json()
     assert len(resp_values) == 4
-    assert isnan(resp_values[0]['profit_abs'])
+    assert resp_values[0]['profit_abs'] is None
 
 
 def test_api_version(botclient):
@@ -1176,6 +1228,7 @@ def test_api_force_entry(botclient, mocker, fee, endpoint):
         'exchange': 'binance',
         'leverage': None,
         'interest_rate': None,
+        'liquidation_price': None,
         'funding_fees': None,
         'trading_mode': 'spot',
         'orders': [],
@@ -1190,7 +1243,7 @@ def test_api_forceexit(botclient, mocker, ticker, fee, markets):
         fetch_ticker=ticker,
         get_fee=fee,
         markets=PropertyMock(return_value=markets),
-        _is_dry_limit_order_filled=MagicMock(return_value=False),
+        _is_dry_limit_order_filled=MagicMock(return_value=True),
     )
     patch_get_signal(ftbot)
 
@@ -1200,12 +1253,27 @@ def test_api_forceexit(botclient, mocker, ticker, fee, markets):
     assert rc.json() == {"error": "Error querying /api/v1/forceexit: invalid argument"}
     Trade.query.session.rollback()
 
-    ftbot.enter_positions()
+    create_mock_trades(fee)
+    trade = Trade.get_trades([Trade.id == 5]).first()
+    assert pytest.approx(trade.amount) == 123
+    rc = client_post(client, f"{BASE_URI}/forceexit",
+                     data='{"tradeid": "5", "ordertype": "market", "amount": 23}')
+    assert_response(rc)
+    assert rc.json() == {'result': 'Created sell order for trade 5.'}
+    Trade.query.session.rollback()
+
+    trade = Trade.get_trades([Trade.id == 5]).first()
+    assert pytest.approx(trade.amount) == 100
+    assert trade.is_open is True
 
     rc = client_post(client, f"{BASE_URI}/forceexit",
-                     data='{"tradeid": "1"}')
+                     data='{"tradeid": "5"}')
     assert_response(rc)
-    assert rc.json() == {'result': 'Created sell order for trade 1.'}
+    assert rc.json() == {'result': 'Created sell order for trade 5.'}
+    Trade.query.session.rollback()
+
+    trade = Trade.get_trades([Trade.id == 5]).first()
+    assert trade.is_open is False
 
 
 def test_api_pair_candles(botclient, ohlcv_history):
@@ -1377,19 +1445,27 @@ def test_api_plot_config(botclient):
     assert isinstance(rc.json()['subplots'], dict)
 
 
-def test_api_strategies(botclient):
+def test_api_strategies(botclient, tmpdir):
     ftbot, client = botclient
+    ftbot.config['user_data_dir'] = Path(tmpdir)
 
     rc = client_get(client, f"{BASE_URI}/strategies")
 
     assert_response(rc)
+
     assert rc.json() == {'strategies': [
         'HyperoptableStrategy',
+        'HyperoptableStrategyV2',
         'InformativeDecoratorTest',
         'StrategyTestV2',
         'StrategyTestV3',
+        'StrategyTestV3CustomEntryPrice',
         'StrategyTestV3Futures',
-        'TestStrategyLegacyV1',
+        'freqai_rl_test_strat',
+        'freqai_test_classifier',
+        'freqai_test_multimodel_classifier_strat',
+        'freqai_test_multimodel_strat',
+        'freqai_test_strat'
     ]}
 
 
@@ -1406,6 +1482,10 @@ def test_api_strategy(botclient):
 
     rc = client_get(client, f"{BASE_URI}/strategy/NoStrat")
     assert_response(rc, 404)
+
+    # Disallow base64 strategies
+    rc = client_get(client, f"{BASE_URI}/strategy/xx:cHJpbnQoImhlbGxvIHdvcmxkIik=")
+    assert_response(rc, 500)
 
 
 def test_list_available_pairs(botclient):
@@ -1485,7 +1565,7 @@ def test_api_backtesting(botclient, mocker, fee, caplog, tmpdir):
     assert not result['running']
     assert result['status_msg'] == 'Backtest reset'
     ftbot.config['export'] = 'trades'
-    ftbot.config['backtest_cache'] = 'none'
+    ftbot.config['backtest_cache'] = 'day'
     ftbot.config['user_data_dir'] = Path(tmpdir)
     ftbot.config['exportfilename'] = Path(tmpdir) / "backtest_results"
     ftbot.config['exportfilename'].mkdir()
@@ -1558,18 +1638,18 @@ def test_api_backtesting(botclient, mocker, fee, caplog, tmpdir):
 
     ApiServer._bgtask_running = False
 
-    mocker.patch('freqtrade.optimize.backtesting.Backtesting.backtest_one_strategy',
-                 side_effect=DependencyException())
-    rc = client_post(client, f"{BASE_URI}/backtest", data=json.dumps(data))
-    assert log_has("Backtesting caused an error: ", caplog)
-
-    ftbot.config['backtest_cache'] = 'day'
-
     # Rerun backtest (should get previous result)
     rc = client_post(client, f"{BASE_URI}/backtest", data=json.dumps(data))
     assert_response(rc)
     result = rc.json()
     assert log_has_re('Reusing result of previous backtest.*', caplog)
+
+    data['stake_amount'] = 101
+
+    mocker.patch('freqtrade.optimize.backtesting.Backtesting.backtest_one_strategy',
+                 side_effect=DependencyException())
+    rc = client_post(client, f"{BASE_URI}/backtest", data=json.dumps(data))
+    assert log_has("Backtesting caused an error: ", caplog)
 
     # Delete backtesting to avoid leakage since the backtest-object may stick around.
     rc = client_delete(client, f"{BASE_URI}/backtest")
@@ -1579,6 +1659,11 @@ def test_api_backtesting(botclient, mocker, fee, caplog, tmpdir):
     assert result['status'] == 'reset'
     assert not result['running']
     assert result['status_msg'] == 'Backtest reset'
+
+    # Disallow base64 strategies
+    data['strategy'] = "xx:cHJpbnQoImhlbGxvIHdvcmxkIik="
+    rc = client_post(client, f"{BASE_URI}/backtest", data=json.dumps(data))
+    assert_response(rc, 500)
 
 
 def test_api_backtest_history(botclient, mocker, testdatadir):
@@ -1622,3 +1707,89 @@ def test_health(botclient):
     ret = rc.json()
     assert ret['last_process_ts'] == 0
     assert ret['last_process'] == '1970-01-01T00:00:00+00:00'
+
+
+def test_api_ws_subscribe(botclient, mocker):
+    ftbot, client = botclient
+    ws_url = f"/api/v1/message/ws?token={_TEST_WS_TOKEN}"
+
+    sub_mock = mocker.patch('freqtrade.rpc.api_server.ws.WebSocketChannel.set_subscriptions')
+
+    with client.websocket_connect(ws_url) as ws:
+        ws.send_json({'type': 'subscribe', 'data': ['whitelist']})
+        time.sleep(1)
+
+    # Check call count is now 1 as we sent a valid subscribe request
+    assert sub_mock.call_count == 1
+
+    with client.websocket_connect(ws_url) as ws:
+        ws.send_json({'type': 'subscribe', 'data': 'whitelist'})
+        time.sleep(1)
+
+    # Call count hasn't changed as the subscribe request was invalid
+    assert sub_mock.call_count == 1
+
+
+def test_api_ws_requests(botclient, mocker, caplog):
+    caplog.set_level(logging.DEBUG)
+
+    ftbot, client = botclient
+    ws_url = f"/api/v1/message/ws?token={_TEST_WS_TOKEN}"
+
+    # Test whitelist request
+    with client.websocket_connect(ws_url) as ws:
+        ws.send_json({"type": "whitelist", "data": None})
+        response = ws.receive_json()
+
+    assert log_has_re(r"Request of type whitelist from.+", caplog)
+    assert response['type'] == "whitelist"
+
+    # Test analyzed_df request
+    with client.websocket_connect(ws_url) as ws:
+        ws.send_json({"type": "analyzed_df", "data": {}})
+        response = ws.receive_json()
+
+    assert log_has_re(r"Request of type analyzed_df from.+", caplog)
+    assert response['type'] == "analyzed_df"
+
+    caplog.clear()
+    # Test analyzed_df request with data
+    with client.websocket_connect(ws_url) as ws:
+        ws.send_json({"type": "analyzed_df", "data": {"limit": 100}})
+        response = ws.receive_json()
+
+    assert log_has_re(r"Request of type analyzed_df from.+", caplog)
+    assert response['type'] == "analyzed_df"
+
+
+def test_api_ws_send_msg(default_conf, mocker, caplog):
+    try:
+        caplog.set_level(logging.DEBUG)
+
+        default_conf.update({"api_server": {"enabled": True,
+                                            "listen_ip_address": "127.0.0.1",
+                                            "listen_port": 8080,
+                                            "CORS_origins": ['http://example.com'],
+                                            "username": _TEST_USER,
+                                            "password": _TEST_PASS,
+                                            "ws_token": _TEST_WS_TOKEN
+                                            }})
+        mocker.patch('freqtrade.rpc.telegram.Updater')
+        mocker.patch('freqtrade.rpc.api_server.ApiServer.start_api')
+        apiserver = ApiServer(default_conf)
+        apiserver.add_rpc_handler(RPC(get_patched_freqtradebot(mocker, default_conf)))
+
+        # Start test client context manager to run lifespan events
+        with TestClient(apiserver.app):
+            # Test message is published on the Message Stream
+            test_message = {"type": "status", "data": "test"}
+            first_waiter = apiserver._message_stream._waiter
+            apiserver.send_msg(test_message)
+            assert first_waiter.result()[0] == test_message
+
+            second_waiter = apiserver._message_stream._waiter
+            apiserver.send_msg(test_message)
+            assert first_waiter != second_waiter
+
+    finally:
+        ApiServer.shutdown()

@@ -2,6 +2,8 @@
 
 import logging
 import time
+from copy import deepcopy
+from datetime import timedelta
 from unittest.mock import MagicMock, PropertyMock
 
 import pandas as pd
@@ -9,10 +11,11 @@ import pytest
 import time_machine
 
 from freqtrade.constants import AVAILABLE_PAIRLISTS
+from freqtrade.data.dataprovider import DataProvider
 from freqtrade.enums import CandleType, RunMode
 from freqtrade.exceptions import OperationalException
 from freqtrade.persistence import Trade
-from freqtrade.plugins.pairlist.pairlist_helpers import expand_pairlist
+from freqtrade.plugins.pairlist.pairlist_helpers import dynamic_expand_pairlist, expand_pairlist
 from freqtrade.plugins.pairlistmanager import PairListManager
 from freqtrade.resolvers import PairListResolver
 from tests.conftest import (create_mock_trades_usdt, get_patched_exchange, get_patched_freqtradebot,
@@ -40,6 +43,12 @@ def whitelist_conf(default_conf):
             "sort_key": "quoteVolume",
         },
     ]
+    default_conf.update({
+        "external_message_consumer": {
+            "enabled": True,
+            "producers": [],
+        }
+    })
     return default_conf
 
 
@@ -126,7 +135,7 @@ def test_log_cached(mocker, static_pl_conf, markets, tickers):
 def test_load_pairlist_noexist(mocker, markets, default_conf):
     freqtrade = get_patched_freqtradebot(mocker, default_conf)
     mocker.patch('freqtrade.exchange.Exchange.markets', PropertyMock(return_value=markets))
-    plm = PairListManager(freqtrade.exchange, default_conf)
+    plm = PairListManager(freqtrade.exchange, default_conf, MagicMock())
     with pytest.raises(OperationalException,
                        match=r"Impossible to load Pairlist 'NonexistingPairList'. "
                              r"This class does not exist or contains Python code errors."):
@@ -137,7 +146,7 @@ def test_load_pairlist_noexist(mocker, markets, default_conf):
 def test_load_pairlist_verify_multi(mocker, markets_static, default_conf):
     freqtrade = get_patched_freqtradebot(mocker, default_conf)
     mocker.patch('freqtrade.exchange.Exchange.markets', PropertyMock(return_value=markets_static))
-    plm = PairListManager(freqtrade.exchange, default_conf)
+    plm = PairListManager(freqtrade.exchange, default_conf, MagicMock())
     # Call different versions one after the other, should always consider what was passed in
     # and have no side-effects (therefore the same check multiple times)
     assert plm.verify_whitelist(['ETH/BTC', 'XRP/BTC', ], print) == ['ETH/BTC', 'XRP/BTC']
@@ -269,7 +278,7 @@ def test_refresh_pairlist_dynamic(mocker, shitcoinmarkets, tickers, whitelist_co
     with pytest.raises(OperationalException,
                        match=r'`number_assets` not specified. Please check your configuration '
                              r'for "pairlist.config.number_assets"'):
-        PairListManager(freqtrade.exchange, whitelist_conf)
+        PairListManager(freqtrade.exchange, whitelist_conf, MagicMock())
 
 
 def test_refresh_pairlist_dynamic_2(mocker, shitcoinmarkets, tickers, whitelist_conf_2):
@@ -366,6 +375,9 @@ def test_VolumePairList_refresh_empty(mocker, markets_empty, whitelist_conf):
     ([{"method": "VolumePairList", "number_assets": 5, "sort_key": "quoteVolume"},
       {"method": "PrecisionFilter"}],
      "BTC", ['ETH/BTC', 'TKN/BTC', 'LTC/BTC', 'XRP/BTC']),
+    ([{"method": "VolumePairList", "number_assets": 5, "sort_key": "quoteVolume"},
+      {"method": "PrecisionFilter"}],
+     "USDT", ['ETH/USDT', 'NANO/USDT']),
     # PriceFilter and VolumePairList
     ([{"method": "VolumePairList", "number_assets": 5, "sort_key": "quoteVolume"},
       {"method": "PriceFilter", "low_price_ratio": 0.03}],
@@ -465,17 +477,25 @@ def test_VolumePairList_refresh_empty(mocker, markets_empty, whitelist_conf):
        "max_rate_of_change": 0.01, "refresh_period": 1440}],
      "BTC", []),  # All removed because of max_rate_of_change being 0.017
     ([{"method": "StaticPairList"},
+      {"method": "RangeStabilityFilter", "lookback_days": 10,
+        "min_rate_of_change": 0.018, "max_rate_of_change": 0.02, "refresh_period": 1440}],
+     "BTC", []),  # All removed - limits are above the highest change_rate
+    ([{"method": "StaticPairList"},
       {"method": "VolatilityFilter", "lookback_days": 3,
        "min_volatility": 0.002, "max_volatility": 0.004, "refresh_period": 1440}],
      "BTC", ['ETH/BTC', 'TKN/BTC']),
     # VolumePairList with no offset = unchanged pairlist
     ([{"method": "VolumePairList", "number_assets": 20, "sort_key": "quoteVolume"},
-      {"method": "OffsetFilter", "offset": 0}],
+      {"method": "OffsetFilter", "offset": 0, "number_assets": 0}],
      "USDT", ['ETH/USDT', 'NANO/USDT', 'ADAHALF/USDT', 'ADADOUBLE/USDT']),
     # VolumePairList with offset = 2
     ([{"method": "VolumePairList", "number_assets": 20, "sort_key": "quoteVolume"},
       {"method": "OffsetFilter", "offset": 2}],
      "USDT", ['ADAHALF/USDT', 'ADADOUBLE/USDT']),
+    # VolumePairList with offset and limit
+    ([{"method": "VolumePairList", "number_assets": 20, "sort_key": "quoteVolume"},
+      {"method": "OffsetFilter", "offset": 1, "number_assets": 2}],
+     "USDT", ['NANO/USDT', 'ADAHALF/USDT']),
     # VolumePairList with higher offset, than total pairlist
     ([{"method": "VolumePairList", "number_assets": 20, "sort_key": "quoteVolume"},
       {"method": "OffsetFilter", "offset": 100}],
@@ -592,9 +612,9 @@ def test_VolumePairList_whitelist_gen(mocker, whitelist_conf, shitcoinmarkets, t
        "lookback_timeframe": "1h", "lookback_period": 2, "refresh_period": 3600}],
      "BTC", "binance", ['ETH/BTC', 'LTC/BTC', 'NEO/BTC', 'TKN/BTC', 'XRP/BTC']),
     # ftx data is already in Quote currency, therefore won't require conversion
-    ([{"method": "VolumePairList", "number_assets": 5, "sort_key": "quoteVolume",
-       "lookback_timeframe": "1d", "lookback_period": 1, "refresh_period": 86400}],
-     "BTC", "ftx", ['HOT/BTC', 'LTC/BTC', 'ETH/BTC', 'TKN/BTC', 'XRP/BTC']),
+    # ([{"method": "VolumePairList", "number_assets": 5, "sort_key": "quoteVolume",
+    #    "lookback_timeframe": "1d", "lookback_period": 1, "refresh_period": 86400}],
+    #  "BTC", "ftx", ['HOT/BTC', 'LTC/BTC', 'ETH/BTC', 'TKN/BTC', 'XRP/BTC']),
 ])
 def test_VolumePairList_range(mocker, whitelist_conf, shitcoinmarkets, tickers, ohlcv_history,
                               pairlists, base_currency, exchange, volumefilter_result) -> None:
@@ -611,12 +631,10 @@ def test_VolumePairList_range(mocker, whitelist_conf, shitcoinmarkets, tickers, 
 
     # create candles for high volume with all candles high volume, but very low price.
     ohlcv_history_high_volume = ohlcv_history.copy()
-    ohlcv_history_high_volume.loc[:, 'volume'] = 10
-    ohlcv_history_high_volume.loc[:, 'low'] = ohlcv_history_high_volume.loc[:, 'low'] * 0.01
-    ohlcv_history_high_volume.loc[:, 'high'] = ohlcv_history_high_volume.loc[:, 'high'] * 0.01
-    ohlcv_history_high_volume.loc[:, 'close'] = ohlcv_history_high_volume.loc[:, 'close'] * 0.01
-
-    mocker.patch('freqtrade.exchange.ftx.Ftx.market_is_tradable', return_value=True)
+    ohlcv_history_high_volume['volume'] = 10
+    ohlcv_history_high_volume['low'] = ohlcv_history_high_volume.loc[:, 'low'] * 0.01
+    ohlcv_history_high_volume['high'] = ohlcv_history_high_volume.loc[:, 'high'] * 0.01
+    ohlcv_history_high_volume['close'] = ohlcv_history_high_volume.loc[:, 'close'] * 0.01
 
     ohlcv_data = {
         ('ETH/BTC', '1d', CandleType.SPOT): ohlcv_history,
@@ -683,7 +701,7 @@ def test_PrecisionFilter_error(mocker, whitelist_conf) -> None:
 
     with pytest.raises(OperationalException,
                        match=r"PrecisionFilter can only work with stoploss defined\..*"):
-        PairListManager(MagicMock, whitelist_conf)
+        PairListManager(MagicMock, whitelist_conf, MagicMock())
 
 
 def test_PerformanceFilter_error(mocker, whitelist_conf, caplog) -> None:
@@ -692,7 +710,7 @@ def test_PerformanceFilter_error(mocker, whitelist_conf, caplog) -> None:
         del Trade.query
     mocker.patch('freqtrade.exchange.Exchange.exchange_has', MagicMock(return_value=True))
     exchange = get_patched_exchange(mocker, whitelist_conf)
-    pm = PairListManager(exchange, whitelist_conf)
+    pm = PairListManager(exchange, whitelist_conf, MagicMock())
     pm.refresh_pairlist()
 
     assert log_has("PerformanceFilter is not available in this mode.", caplog)
@@ -701,15 +719,26 @@ def test_PerformanceFilter_error(mocker, whitelist_conf, caplog) -> None:
 def test_ShuffleFilter_init(mocker, whitelist_conf, caplog) -> None:
     whitelist_conf['pairlists'] = [
         {"method": "StaticPairList"},
-        {"method": "ShuffleFilter", "seed": 42}
+        {"method": "ShuffleFilter", "seed": 43}
     ]
 
     exchange = get_patched_exchange(mocker, whitelist_conf)
-    PairListManager(exchange, whitelist_conf)
-    assert log_has("Backtesting mode detected, applying seed value: 42", caplog)
+    plm = PairListManager(exchange, whitelist_conf)
+    assert log_has("Backtesting mode detected, applying seed value: 43", caplog)
+
+    with time_machine.travel("2021-09-01 05:01:00 +00:00") as t:
+        plm.refresh_pairlist()
+        pl1 = deepcopy(plm.whitelist)
+        plm.refresh_pairlist()
+        assert plm.whitelist == pl1
+
+        t.shift(timedelta(minutes=10))
+        plm.refresh_pairlist()
+        assert plm.whitelist != pl1
+
     caplog.clear()
     whitelist_conf['runmode'] = RunMode.DRY_RUN
-    PairListManager(exchange, whitelist_conf)
+    plm = PairListManager(exchange, whitelist_conf)
     assert not log_has("Backtesting mode detected, applying seed value: 42", caplog)
     assert log_has("Live mode detected, not applying seed.", caplog)
 
@@ -731,7 +760,7 @@ def test_PerformanceFilter_lookback(mocker, default_conf_usdt, fee, caplog) -> N
     with time_machine.travel("2021-09-01 05:00:00 +00:00") as t:
         create_mock_trades_usdt(fee)
         pm.refresh_pairlist()
-        assert pm.whitelist == ['XRP/USDT']
+        assert pm.whitelist == ['XRP/USDT', 'NEO/USDT']
         assert log_has_re(r'Removing pair .* since .* is below .*', caplog)
 
         # Move to "outside" of lookback window, so original sorting is restored.
@@ -758,8 +787,8 @@ def test_PerformanceFilter_keep_mid_order(mocker, default_conf_usdt, fee, caplog
     with time_machine.travel("2021-09-01 05:00:00 +00:00") as t:
         create_mock_trades_usdt(fee)
         pm.refresh_pairlist()
-        assert pm.whitelist == ['XRP/USDT', 'ETC/USDT', 'ETH/USDT',
-                                'NEO/USDT', 'TKN/USDT', 'ADA/USDT', 'LTC/USDT']
+        assert pm.whitelist == ['XRP/USDT', 'NEO/USDT', 'ETH/USDT', 'LTC/USDT',
+                                'TKN/USDT', 'ADA/USDT', 'ETC/USDT', ]
         # assert log_has_re(r'Removing pair .* since .* is below .*', caplog)
 
         # Move to "outside" of lookback window, so original sorting is restored.
@@ -1152,6 +1181,14 @@ def test_spreadfilter_invalid_data(mocker, default_conf, markets, tickers, caplo
      "0.01 and above 0.99 over the last days.'}]",
         None
      ),
+    ({"method": "OffsetFilter", "offset": 5, "number_assets": 10},
+     "[{'OffsetFilter': 'OffsetFilter - Taking 10 Pairs, starting from 5.'}]",
+     None
+     ),
+    ({"method": "ProducerPairList"},
+     "[{'ProducerPairList': 'ProducerPairList - default'}]",
+     None
+     ),
 ])
 def test_pricefilter_desc(mocker, whitelist_conf, markets, pairlistconfig,
                           desc_expected, exception_expected):
@@ -1274,6 +1311,22 @@ def test_expand_pairlist(wildcardlist, pairs, expected):
             expand_pairlist(wildcardlist, pairs)
     else:
         assert sorted(expand_pairlist(wildcardlist, pairs)) == sorted(expected)
+        conf = {
+            'pairs': wildcardlist,
+            'freqai': {
+                "enabled": True,
+                "feature_parameters": {
+                    "include_corr_pairlist": [
+                        "BTC/USDT:USDT",
+                        "XRP/BUSD",
+                    ]
+                }
+            }
+        }
+        assert sorted(dynamic_expand_pairlist(conf, pairs)) == sorted(expected + [
+            "BTC/USDT:USDT",
+            "XRP/BUSD",
+        ])
 
 
 @pytest.mark.parametrize('wildcardlist,pairs,expected', [
@@ -1310,3 +1363,77 @@ def test_expand_pairlist_keep_invalid(wildcardlist, pairs, expected):
             expand_pairlist(wildcardlist, pairs, keep_invalid=True)
     else:
         assert sorted(expand_pairlist(wildcardlist, pairs, keep_invalid=True)) == sorted(expected)
+
+
+def test_ProducerPairlist_no_emc(mocker, whitelist_conf):
+    mocker.patch('freqtrade.exchange.Exchange.exchange_has', MagicMock(return_value=True))
+
+    whitelist_conf['pairlists'] = [
+        {
+            "method": "ProducerPairList",
+            "number_assets": 10,
+            "producer_name": "hello_world",
+        }
+    ]
+    del whitelist_conf['external_message_consumer']
+
+    with pytest.raises(OperationalException,
+                       match=r"ProducerPairList requires external_message_consumer to be enabled."):
+        get_patched_freqtradebot(mocker, whitelist_conf)
+
+
+def test_ProducerPairlist(mocker, whitelist_conf, markets):
+    mocker.patch('freqtrade.exchange.Exchange.exchange_has', MagicMock(return_value=True))
+    mocker.patch.multiple('freqtrade.exchange.Exchange',
+                          markets=PropertyMock(return_value=markets),
+                          exchange_has=MagicMock(return_value=True),
+                          )
+    whitelist_conf['pairlists'] = [
+        {
+            "method": "ProducerPairList",
+            "number_assets": 2,
+            "producer_name": "hello_world",
+        }
+    ]
+    whitelist_conf.update({
+        "external_message_consumer": {
+            "enabled": True,
+            "producers": [
+                {
+                    "name": "hello_world",
+                    "host": "null",
+                    "port": 9891,
+                    "ws_token": "dummy",
+                }
+            ]
+        }
+    })
+
+    exchange = get_patched_exchange(mocker, whitelist_conf)
+    dp = DataProvider(whitelist_conf, exchange, None)
+    pairs = ['ETH/BTC', 'LTC/BTC', 'XRP/BTC']
+    # different producer
+    dp._set_producer_pairs(pairs + ['MEEP/USDT'], 'default')
+    pm = PairListManager(exchange, whitelist_conf, dp)
+    pm.refresh_pairlist()
+    assert pm.whitelist == []
+    # proper producer
+    dp._set_producer_pairs(pairs, 'hello_world')
+    pm.refresh_pairlist()
+
+    # Pairlist reduced to 2
+    assert pm.whitelist == pairs[:2]
+    assert len(pm.whitelist) == 2
+    whitelist_conf['exchange']['pair_whitelist'] = ['TKN/BTC']
+
+    whitelist_conf['pairlists'] = [
+        {"method": "StaticPairList"},
+        {
+            "method": "ProducerPairList",
+            "producer_name": "hello_world",
+        }
+    ]
+    pm = PairListManager(exchange, whitelist_conf, dp)
+    pm.refresh_pairlist()
+    assert len(pm.whitelist) == 4
+    assert pm.whitelist == ['TKN/BTC'] + pairs

@@ -83,7 +83,7 @@ from pathlib import Path
 project_root = "somedir/freqtrade"
 i=0
 try:
-    os.chdirdir(project_root)
+    os.chdir(project_root)
     assert Path('LICENSE').is_file()
 except:
     while i<4 and (not Path('LICENSE').is_file()):
@@ -122,5 +122,6 @@ Best avoid relative paths, since this starts at the storage location of the jupy
 
 * [Strategy debugging](strategy_analysis_example.md) - also available as Jupyter notebook (`user_data/notebooks/strategy_analysis_example.ipynb`)
 * [Plotting](plotting.md)
+* [Tag Analysis](advanced-backtesting.md)
 
 Feel free to submit an issue or Pull Request enhancing this document if you would like to share ideas on how to best analyze the data.

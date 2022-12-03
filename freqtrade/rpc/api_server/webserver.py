@@ -1,15 +1,17 @@
 import logging
 from ipaddress import IPv4Address
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-import rapidjson
+import orjson
 import uvicorn
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 
+from freqtrade.constants import Config
 from freqtrade.exceptions import OperationalException
 from freqtrade.rpc.api_server.uvicorn_threaded import UvicornServer
+from freqtrade.rpc.api_server.ws.message_stream import MessageStream
 from freqtrade.rpc.rpc import RPC, RPCException, RPCHandler
 
 
@@ -24,7 +26,7 @@ class FTJSONResponse(JSONResponse):
         Use rapidjson for responses
         Handles NaN and Inf / -Inf in a javascript way by default.
         """
-        return rapidjson.dumps(content).encode("utf-8")
+        return orjson.dumps(content, option=orjson.OPT_SERIALIZE_NUMPY)
 
 
 class ApiServer(RPCHandler):
@@ -37,12 +39,14 @@ class ApiServer(RPCHandler):
     _bt = None
     _bt_data = None
     _bt_timerange = None
-    _bt_last_config: Dict[str, Any] = {}
+    _bt_last_config: Config = {}
     _has_rpc: bool = False
     _bgtask_running: bool = False
-    _config: Dict[str, Any] = {}
+    _config: Config = {}
     # Exchange - only available in webserver mode.
     _exchange = None
+    # websocket message stuff
+    _message_stream: Optional[MessageStream] = None
 
     def __new__(cls, *args, **kwargs):
         """
@@ -54,12 +58,13 @@ class ApiServer(RPCHandler):
             ApiServer.__initialized = False
         return ApiServer.__instance
 
-    def __init__(self, config: Dict[str, Any], standalone: bool = False) -> None:
+    def __init__(self, config: Config, standalone: bool = False) -> None:
         ApiServer._config = config
         if self.__initialized and (standalone or self._standalone):
             return
         self._standalone: bool = standalone
         self._server = None
+
         ApiServer.__initialized = True
 
         api_config = self._config['api_server']
@@ -70,7 +75,6 @@ class ApiServer(RPCHandler):
                            default_response_class=FTJSONResponse,
                            )
         self.configure_app(self.app, self._config)
-
         self.start_api()
 
     def add_rpc_handler(self, rpc: RPC):
@@ -90,6 +94,7 @@ class ApiServer(RPCHandler):
         del ApiServer._rpc
         if self._server and not self._standalone:
             logger.info("Stopping API Server")
+            # self._server.force_exit, self._server.should_exit = True, True
             self._server.cleanup()
 
     @classmethod
@@ -100,8 +105,12 @@ class ApiServer(RPCHandler):
         cls._has_rpc = False
         cls._rpc = None
 
-    def send_msg(self, msg: Dict[str, str]) -> None:
-        pass
+    def send_msg(self, msg: Dict[str, Any]) -> None:
+        """
+        Publish the message to the message stream
+        """
+        if ApiServer._message_stream:
+            ApiServer._message_stream.publish(msg)
 
     def handle_rpc_exception(self, request, exc):
         logger.exception(f"API Error calling: {exc}")
@@ -115,6 +124,7 @@ class ApiServer(RPCHandler):
         from freqtrade.rpc.api_server.api_backtest import router as api_backtest
         from freqtrade.rpc.api_server.api_v1 import router as api_v1
         from freqtrade.rpc.api_server.api_v1 import router_public as api_v1_public
+        from freqtrade.rpc.api_server.api_ws import router as ws_router
         from freqtrade.rpc.api_server.web_ui import router_ui
 
         app.include_router(api_v1_public, prefix="/api/v1")
@@ -125,6 +135,7 @@ class ApiServer(RPCHandler):
         app.include_router(api_backtest, prefix="/api/v1",
                            dependencies=[Depends(http_basic_or_jwt_token)],
                            )
+        app.include_router(ws_router, prefix="/api/v1")
         app.include_router(router_login, prefix="/api/v1", tags=["auth"])
         # UI Router MUST be last!
         app.include_router(router_ui, prefix='')
@@ -138,6 +149,30 @@ class ApiServer(RPCHandler):
         )
 
         app.add_exception_handler(RPCException, self.handle_rpc_exception)
+        app.add_event_handler(
+            event_type="startup",
+            func=self._api_startup_event
+        )
+        app.add_event_handler(
+            event_type="shutdown",
+            func=self._api_shutdown_event
+        )
+
+    async def _api_startup_event(self):
+        """
+        Creates the MessageStream class on startup
+        so it has access to the same event loop
+        as uvicorn
+        """
+        if not ApiServer._message_stream:
+            ApiServer._message_stream = MessageStream()
+
+    async def _api_shutdown_event(self):
+        """
+        Removes the MessageStream class on shutdown
+        """
+        if ApiServer._message_stream:
+            ApiServer._message_stream = None
 
     def start_api(self):
         """
@@ -170,6 +205,7 @@ class ApiServer(RPCHandler):
                                   use_colors=False,
                                   log_config=None,
                                   access_log=True if verbosity != 'error' else False,
+                                  ws_ping_interval=None  # We do this explicitly ourselves
                                   )
         try:
             self._server = UvicornServer(uvconfig)

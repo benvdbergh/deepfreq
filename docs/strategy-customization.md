@@ -166,7 +166,7 @@ Additional technical libraries can be installed as necessary, or custom indicato
 
 Most indicators have an instable startup period, in which they are either not available (NaN), or the calculation is incorrect. This can lead to inconsistencies, since Freqtrade does not know how long this instable period should be.
 To account for this, the strategy can be assigned the `startup_candle_count` attribute.
-This should be set to the maximum number of candles that the strategy requires to calculate stable indicators.
+This should be set to the maximum number of candles that the strategy requires to calculate stable indicators. In the case where a user includes higher timeframes with informative pairs, the `startup_candle_count` does not necessarily change. The value is the maximum period (in candles) that any of the informatives timeframes need to compute stable indicators.
 
 In this example strategy, this should be set to 100 (`startup_candle_count = 100`), since the longest needed history is 100 candles.
 
@@ -264,7 +264,8 @@ def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFram
 ### Exit signal rules
 
 Edit the method `populate_exit_trend()` into your strategy file to update your exit strategy.
-Please note that the exit-signal is only used if `use_exit_signal` is set to true in the configuration.
+The exit-signal is only used for exits if `use_exit_signal` is set to true in the configuration.
+`use_exit_signal` will not influence [signal collision rules](#colliding-signals) - which will still apply and can prevent entries.
 
 It's important to always return the dataframe without removing/modifying the columns `"open", "high", "low", "close", "volume"`, otherwise these fields would contain something unexpected.
 
@@ -445,15 +446,17 @@ A full sample can be found [in the DataProvider section](#complete-data-provider
 
 ??? Note "Alternative candle types"
     Informative_pairs can also provide a 3rd tuple element defining the candle type explicitly.
-    Availability of alternative candle-types will depend on the trading-mode and the exchange. Details about this can be found in the exchange documentation.
+    Availability of alternative candle-types will depend on the trading-mode and the exchange. 
+    In general, spot pairs cannot be used in futures markets, and futures candles can't be used as informative pairs for spot bots.
+    Details about this may vary, if they do, this can be found in the exchange documentation.
 
     ``` python
     def informative_pairs(self):
         return [
-            ("ETH/USDT", "5m", ""),   # Uses default candletype, depends on trading_mode 
-            ("ETH/USDT", "5m", "spot"),   # Forces usage of spot candles
-            ("BTC/TUSD", "15m", "futures"),  # Uses futures candles
-            ("BTC/TUSD", "15m", "mark"),  # Uses mark candles
+            ("ETH/USDT", "5m", ""),   # Uses default candletype, depends on trading_mode (recommended)
+            ("ETH/USDT", "5m", "spot"),   # Forces usage of spot candles (only valid for bots running on spot markets).
+            ("BTC/TUSD", "15m", "futures"),  # Uses futures candles (only bots with `trading_mode=futures`)
+            ("BTC/TUSD", "15m", "mark"),  # Uses mark candles (only bots with `trading_mode=futures`)
         ]
     ```
 ***
@@ -617,9 +620,8 @@ Please always check the mode of operation to select the correct method to get da
 ### *available_pairs*
 
 ``` python
-if self.dp:
-    for pair, timeframe in self.dp.available_pairs:
-        print(f"available {pair}, {timeframe}")
+for pair, timeframe in self.dp.available_pairs:
+    print(f"available {pair}, {timeframe}")
 ```
 
 ### *current_whitelist()*
@@ -630,7 +632,7 @@ The strategy might look something like this:
 
 *Scan through the top 10 pairs by volume using the `VolumePairList` every 5 minutes and use a 14 day RSI to buy and sell.*
 
-Due to the limited available data, it's very difficult to resample `5m` candles into daily candles for use in a 14 day RSI. Most exchanges limit us to just 500 candles which effectively gives us around 1.74 daily candles. We need 14 days at least!
+Due to the limited available data, it's very difficult to resample `5m` candles into daily candles for use in a 14 day RSI. Most exchanges limit us to just 500-1000 candles which effectively gives us around 1.74 daily candles. We need 14 days at least!
 
 Since we can't resample the data we will have to use an informative pair; and since the whitelist will be dynamic we don't know which pair(s) to use.
 
@@ -646,20 +648,22 @@ This is where calling `self.dp.current_whitelist()` comes in handy.
         return informative_pairs
 ```
 
+??? Note "Plotting with current_whitelist"
+    Current whitelist is not supported for `plot-dataframe`, as this command is usually used by providing an explicit pairlist - and would therefore make the return values of this method misleading.
+
 ### *get_pair_dataframe(pair, timeframe)*
 
 ``` python
 # fetch live / historical candle (OHLCV) data for the first informative pair
-if self.dp:
-    inf_pair, inf_timeframe = self.informative_pairs()[0]
-    informative = self.dp.get_pair_dataframe(pair=inf_pair,
-                                             timeframe=inf_timeframe)
+inf_pair, inf_timeframe = self.informative_pairs()[0]
+informative = self.dp.get_pair_dataframe(pair=inf_pair,
+                                         timeframe=inf_timeframe)
 ```
 
 !!! Warning "Warning about backtesting"
-    Be careful when using dataprovider in backtesting. `historic_ohlcv()` (and `get_pair_dataframe()`
-    for the backtesting runmode) provides the full time-range in one go,
-    so please be aware of it and make sure to not "look into the future" to avoid surprises when running in dry/live mode.
+    In backtesting, `dp.get_pair_dataframe()` behavior differs depending on where it's called.
+    Within `populate_*()` methods, `dp.get_pair_dataframe()` returns the full timerange. Please make sure to not "look into the future" to avoid surprises when running in dry/live mode.
+    Within [callbacks](strategy-callbacks.md), you'll get the full timerange up to the current (simulated) candle.
 
 ### *get_analyzed_dataframe(pair, timeframe)*
 
@@ -668,24 +672,22 @@ It can also be used in specific callbacks to get the signal that caused the acti
 
 ``` python
 # fetch current dataframe
-if self.dp:
-    if self.dp.runmode.value in ('live', 'dry_run'):
-        dataframe, last_updated = self.dp.get_analyzed_dataframe(pair=metadata['pair'],
-                                                                 timeframe=self.timeframe)
+dataframe, last_updated = self.dp.get_analyzed_dataframe(pair=metadata['pair'],
+                                                         timeframe=self.timeframe)
 ```
 
 !!! Note "No data available"
     Returns an empty dataframe if the requested pair was not cached.
+    You can check for this with `if dataframe.empty:` and handle this case accordingly.
     This should not happen when using whitelisted pairs.
 
 ### *orderbook(pair, maximum)*
 
 ``` python
-if self.dp:
-    if self.dp.runmode.value in ('live', 'dry_run'):
-        ob = self.dp.orderbook(metadata['pair'], 1)
-        dataframe['best_bid'] = ob['bids'][0][0]
-        dataframe['best_ask'] = ob['asks'][0][0]
+if self.dp.runmode.value in ('live', 'dry_run'):
+    ob = self.dp.orderbook(metadata['pair'], 1)
+    dataframe['best_bid'] = ob['bids'][0][0]
+    dataframe['best_ask'] = ob['asks'][0][0]
 ```
 
 The orderbook structure is aligned with the order structure from [ccxt](https://github.com/ccxt/ccxt/wiki/Manual#order-book-structure), so the result will look as follows:
@@ -714,22 +716,38 @@ Therefore, using `ob['bids'][0][0]` as demonstrated above will result in using t
 ### *ticker(pair)*
 
 ``` python
-if self.dp:
-    if self.dp.runmode.value in ('live', 'dry_run'):
-        ticker = self.dp.ticker(metadata['pair'])
-        dataframe['last_price'] = ticker['last']
-        dataframe['volume24h'] = ticker['quoteVolume']
-        dataframe['vwap'] = ticker['vwap']
+if self.dp.runmode.value in ('live', 'dry_run'):
+    ticker = self.dp.ticker(metadata['pair'])
+    dataframe['last_price'] = ticker['last']
+    dataframe['volume24h'] = ticker['quoteVolume']
+    dataframe['vwap'] = ticker['vwap']
 ```
 
 !!! Warning
     Although the ticker data structure is a part of the ccxt Unified Interface, the values returned by this method can
-    vary for different exchanges. For instance, many exchanges do not return `vwap` values, the FTX exchange
+    vary for different exchanges. For instance, many exchanges do not return `vwap` values, some exchanges
     does not always fills in the `last` field (so it can be None), etc. So you need to carefully verify the ticker
     data returned from the exchange and add appropriate error handling / defaults.
 
 !!! Warning "Warning about backtesting"
-    This method will always return up-to-date values - so usage during backtesting / hyperopt will lead to wrong results.
+    This method will always return up-to-date values - so usage during backtesting / hyperopt without runmode checks will lead to wrong results.
+
+### Send Notification
+
+The dataprovider `.send_msg()` function allows you to send custom notifications from your strategy.
+Identical notifications will only be sent once per candle, unless the 2nd argument (`always_send`) is set to True.
+
+``` python
+    self.dp.send_msg(f"{metadata['pair']} just got hot!")
+
+    # Force send this notification, avoid caching (Please read warning below!)
+    self.dp.send_msg(f"{metadata['pair']} just got hot!", always_send=True)
+```
+
+Notifications will only be sent in trading modes (Live/Dry-run) - so this method can be called without conditions for backtesting.
+
+!!! Warning "Spamming"
+    You can spam yourself pretty good by setting `always_send=True` in this method. Use this with great care and only in conditions you know will not happen throughout a candle to avoid a message every 5 seconds.
 
 ### Complete Data-provider sample
 
@@ -808,6 +826,8 @@ Options:
 - Rename the columns for you to create unique columns
 - Merge the dataframe without lookahead bias
 - Forward-fill (optional)
+
+For a full sample, please refer to the [complete data provider example](#complete-data-provider-sample) below.
 
 All columns of the informative dataframe will be available on the returning dataframe in a renamed fashion:
 

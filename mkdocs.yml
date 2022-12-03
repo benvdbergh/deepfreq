@@ -1,6 +1,7 @@
 site_name: Freqtrade
 site_url: https://www.freqtrade.io/
 repo_url: https://github.com/freqtrade/freqtrade
+edit_uri: edit/develop/docs/
 use_directory_urls: True
 nav:
     - Home: index.md
@@ -22,6 +23,14 @@ nav:
     - Data Downloading: data-download.md
     - Backtesting: backtesting.md
     - Hyperopt: hyperopt.md
+    - FreqAI:
+        - Introduction: freqai.md
+        - Configuration: freqai-configuration.md
+        - Parameter table: freqai-parameter-table.md
+        - Feature engineering: freqai-feature-engineering.md
+        - Running FreqAI: freqai-running.md
+        - Reinforcement Learning: freqai-reinforcement-learning.md
+        - Developer guide: freqai-developers.md
     - Short / Leverage: leverage.md
     - Utility Sub-commands: utils.md
     - Plotting: plotting.md
@@ -29,11 +38,13 @@ nav:
     - Data Analysis:
         - Jupyter Notebooks: data-analysis.md
         - Strategy analysis: strategy_analysis_example.md
+        - Backtest analysis: advanced-backtesting.md
     - Advanced Topics:
         - Advanced Post-installation Tasks: advanced-setup.md
-        - Edge Positioning: edge.md
         - Advanced Strategy: strategy-advanced.md
         - Advanced Hyperopt: advanced-hyperopt.md
+        - Producer/Consumer mode: producer-consumer.md
+        - Edge Positioning: edge.md
         - Sandbox Testing: sandbox-testing.md
     - FAQ: faq.md
     - SQL Cheat-sheet: sql_cheatsheet.md
@@ -46,6 +57,8 @@ theme:
   logo: "images/logo.png"
   favicon: "images/logo.png"
   custom_dir: "docs/overrides"
+  features:
+    - search.share
   palette:
     - scheme: default
       primary: "blue grey"

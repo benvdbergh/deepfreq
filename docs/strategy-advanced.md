@@ -106,6 +106,12 @@ def custom_exit(self, pair: str, trade: Trade, current_time: datetime, current_r
 !!! Note
     `enter_tag` is limited to 100 characters, remaining data will be truncated.
 
+!!! Warning
+    There is only one `enter_tag` column, which is used for both long and short trades.
+    As a consequence, this column must be treated as "last write wins" (it's just a dataframe column after all).
+    In fancy situations, where multiple signals collide (or if signals are deactivated again based on different conditions), this can lead to odd results with the wrong tag applied to an entry signal.
+    These results are a consequence of the strategy overwriting prior tags - where the last tag will "stick" and will be the one freqtrade will use.
+
 ## Exit tag
 
 Similar to [Buy Tagging](#buy-tag), you can also specify a sell tag.
@@ -224,3 +230,5 @@ for val in self.buy_ema_short.range:
 # Append columns to existing dataframe
 merged_frame = pd.concat(frames, axis=1)
 ```
+
+Freqtrade does however also counter this by running `dataframe.copy()` on the dataframe right after the `populate_indicators()` method - so performance implications of this should be low to non-existant.

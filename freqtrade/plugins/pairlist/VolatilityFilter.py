@@ -11,8 +11,9 @@ import numpy as np
 from cachetools import TTLCache
 from pandas import DataFrame
 
-from freqtrade.constants import ListPairsWithTimeframes
+from freqtrade.constants import Config, ListPairsWithTimeframes
 from freqtrade.exceptions import OperationalException
+from freqtrade.exchange.types import Tickers
 from freqtrade.misc import plural
 from freqtrade.plugins.pairlist.IPairList import IPairList
 
@@ -26,7 +27,7 @@ class VolatilityFilter(IPairList):
     """
 
     def __init__(self, exchange, pairlistmanager,
-                 config: Dict[str, Any], pairlistconfig: Dict[str, Any],
+                 config: Config, pairlistconfig: Dict[str, Any],
                  pairlist_pos: int) -> None:
         super().__init__(exchange, pairlistmanager, config, pairlistconfig, pairlist_pos)
 
@@ -38,12 +39,12 @@ class VolatilityFilter(IPairList):
 
         self._pair_cache: TTLCache = TTLCache(maxsize=1000, ttl=self._refresh_period)
 
+        candle_limit = exchange.ohlcv_candle_limit('1d', self._config['candle_type_def'])
         if self._days < 1:
             raise OperationalException("VolatilityFilter requires lookback_days to be >= 1")
-        if self._days > exchange.ohlcv_candle_limit('1d'):
+        if self._days > candle_limit:
             raise OperationalException("VolatilityFilter requires lookback_days to not "
-                                       "exceed exchange max request size "
-                                       f"({exchange.ohlcv_candle_limit('1d')})")
+                                       f"exceed exchange max request size ({candle_limit})")
 
     @property
     def needstickers(self) -> bool:
@@ -62,11 +63,11 @@ class VolatilityFilter(IPairList):
                 f"{self._min_volatility}-{self._max_volatility} "
                 f" the last {self._days} {plural(self._days, 'day')}.")
 
-    def filter_pairlist(self, pairlist: List[str], tickers: Dict) -> List[str]:
+    def filter_pairlist(self, pairlist: List[str], tickers: Tickers) -> List[str]:
         """
         Validate trading range
         :param pairlist: pairlist to filter or sort
-        :param tickers: Tickers (from exchange.get_tickers()). May be cached.
+        :param tickers: Tickers (from exchange.get_tickers). May be cached.
         :return: new allowlist
         """
         needed_pairs: ListPairsWithTimeframes = [

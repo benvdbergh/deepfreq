@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, Mock, PropertyMock
 
 import arrow
 import numpy as np
+import pandas as pd
 import pytest
 from telegram import Chat, Message, Update
 
@@ -19,6 +20,7 @@ from freqtrade.data.converter import ohlcv_to_dataframe
 from freqtrade.edge import PairInfo
 from freqtrade.enums import CandleType, MarginMode, RunMode, SignalDirection, TradingMode
 from freqtrade.exchange import Exchange
+from freqtrade.exchange.exchange import timeframe_to_minutes
 from freqtrade.freqtradebot import FreqtradeBot
 from freqtrade.persistence import LocalTrade, Order, Trade, init_db
 from freqtrade.resolvers import ExchangeResolver
@@ -58,6 +60,11 @@ def log_has(line, logs):
     return any(line == message for message in logs.messages)
 
 
+def log_has_when(line, logs, when):
+    """Check if line is found in caplog's messages during a specified stage"""
+    return any(line == message.message for message in logs.get_records(when))
+
+
 def log_has_re(line, logs):
     """Check if line matches some caplog's message."""
     return any(re.match(line, message) for message in logs.messages)
@@ -77,10 +84,49 @@ def get_args(args):
     return Arguments(args).get_parsed_arg()
 
 
+def generate_test_data(timeframe: str, size: int, start: str = '2020-07-05'):
+    np.random.seed(42)
+    tf_mins = timeframe_to_minutes(timeframe)
+
+    base = np.random.normal(20, 2, size=size)
+
+    date = pd.date_range(start, periods=size, freq=f'{tf_mins}min', tz='UTC')
+    df = pd.DataFrame({
+        'date': date,
+        'open': base,
+        'high': base + np.random.normal(2, 1, size=size),
+        'low': base - np.random.normal(2, 1, size=size),
+        'close': base + np.random.normal(0, 1, size=size),
+        'volume': np.random.normal(200, size=size)
+    }
+    )
+    df = df.dropna()
+    return df
+
+
+def generate_test_data_raw(timeframe: str, size: int, start: str = '2020-07-05'):
+    """ Generates data in the ohlcv format used by ccxt """
+    df = generate_test_data(timeframe, size, start)
+    df['date'] = df.loc[:, 'date'].view(np.int64) // 1000 // 1000
+    return list(list(x) for x in zip(*(df[x].values.tolist() for x in df.columns)))
+
+
 # Source: https://stackoverflow.com/questions/29881236/how-to-mock-asyncio-coroutines
-def get_mock_coro(return_value):
+# TODO: This should be replaced with AsyncMock once support for python 3.7 is dropped.
+def get_mock_coro(return_value=None, side_effect=None):
     async def mock_coro(*args, **kwargs):
-        return return_value
+        if side_effect:
+            if isinstance(side_effect, list):
+                effect = side_effect.pop(0)
+            else:
+                effect = side_effect
+            if isinstance(effect, Exception):
+                raise effect
+            if callable(effect):
+                return effect(*args, **kwargs)
+            return effect
+        else:
+            return return_value
 
     return Mock(wraps=mock_coro)
 
@@ -100,11 +146,8 @@ def patch_exchange(
     mock_supported_modes=True
 ) -> None:
     mocker.patch('freqtrade.exchange.Exchange._load_async_markets', MagicMock(return_value={}))
-    mocker.patch('freqtrade.exchange.Exchange.validate_pairs', MagicMock())
+    mocker.patch('freqtrade.exchange.Exchange.validate_config', MagicMock())
     mocker.patch('freqtrade.exchange.Exchange.validate_timeframes', MagicMock())
-    mocker.patch('freqtrade.exchange.Exchange.validate_ordertypes', MagicMock())
-    mocker.patch('freqtrade.exchange.Exchange.validate_stakecurrency', MagicMock())
-    mocker.patch('freqtrade.exchange.Exchange.validate_pricing')
     mocker.patch('freqtrade.exchange.Exchange.id', PropertyMock(return_value=id))
     mocker.patch('freqtrade.exchange.Exchange.name', PropertyMock(return_value=id.title()))
     mocker.patch('freqtrade.exchange.Exchange.precisionMode', PropertyMock(return_value=2))
@@ -139,7 +182,7 @@ def get_patched_exchange(mocker, config, api_mock=None, id='binance',
     patch_exchange(mocker, api_mock, id, mock_markets, mock_supported_modes)
     config['exchange']['name'] = id
     try:
-        exchange = ExchangeResolver.load_exchange(id, config)
+        exchange = ExchangeResolver.load_exchange(id, config, load_leverage_tiers=True)
     except ImportError:
         exchange = Exchange(config)
     return exchange
@@ -186,6 +229,8 @@ def patch_freqtradebot(mocker, config) -> None:
     mocker.patch('freqtrade.freqtradebot.RPCManager._init', MagicMock())
     mocker.patch('freqtrade.freqtradebot.RPCManager.send_msg', MagicMock())
     patch_whitelist(mocker, config)
+    mocker.patch('freqtrade.freqtradebot.ExternalMessageConsumer')
+    mocker.patch('freqtrade.configuration.config_validation._validate_consumers')
 
 
 def get_patched_freqtradebot(mocker, config) -> FreqtradeBot:
@@ -325,7 +370,7 @@ def create_mock_trades_with_leverage(fee, use_db: bool = True):
         Trade.query.session.flush()
 
 
-def create_mock_trades_usdt(fee, use_db: bool = True):
+def create_mock_trades_usdt(fee, is_short: Optional[bool] = False, use_db: bool = True):
     """
     Create some fake trades ...
     """
@@ -335,26 +380,29 @@ def create_mock_trades_usdt(fee, use_db: bool = True):
         else:
             LocalTrade.add_bt_trade(trade)
 
+    is_short1 = is_short if is_short is not None else True
+    is_short2 = is_short if is_short is not None else False
+
     # Simulate dry_run entries
-    trade = mock_trade_usdt_1(fee)
+    trade = mock_trade_usdt_1(fee, is_short1)
     add_trade(trade)
 
-    trade = mock_trade_usdt_2(fee)
+    trade = mock_trade_usdt_2(fee, is_short1)
     add_trade(trade)
 
-    trade = mock_trade_usdt_3(fee)
+    trade = mock_trade_usdt_3(fee, is_short1)
     add_trade(trade)
 
-    trade = mock_trade_usdt_4(fee)
+    trade = mock_trade_usdt_4(fee, is_short2)
     add_trade(trade)
 
-    trade = mock_trade_usdt_5(fee)
+    trade = mock_trade_usdt_5(fee, is_short2)
     add_trade(trade)
 
-    trade = mock_trade_usdt_6(fee)
+    trade = mock_trade_usdt_6(fee, is_short1)
     add_trade(trade)
 
-    trade = mock_trade_usdt_7(fee)
+    trade = mock_trade_usdt_7(fee, is_short1)
     add_trade(trade)
     if use_db:
         Trade.commit()
@@ -384,7 +432,7 @@ def patch_coingekko(mocker) -> None:
 
 @pytest.fixture(scope='function')
 def init_persistence(default_conf):
-    init_db(default_conf['db_url'], default_conf['dry_run'])
+    init_db(default_conf['db_url'])
 
 
 @pytest.fixture(scope="function")
@@ -1615,6 +1663,7 @@ def limit_buy_order_open():
         'timestamp': arrow.utcnow().int_timestamp * 1000,
         'datetime': arrow.utcnow().isoformat(),
         'price': 0.00001099,
+        'average': 0.00001099,
         'amount': 90.99181073,
         'filled': 0.0,
         'cost': 0.0009999,
@@ -1630,40 +1679,6 @@ def limit_buy_order(limit_buy_order_open):
     order['filled'] = order['amount']
     order['remaining'] = 0.0
     return order
-
-
-@pytest.fixture(scope='function')
-def market_buy_order():
-    return {
-        'id': 'mocked_market_buy',
-        'type': 'market',
-        'side': 'buy',
-        'symbol': 'mocked',
-        'timestamp': arrow.utcnow().int_timestamp * 1000,
-        'datetime': arrow.utcnow().isoformat(),
-        'price': 0.00004099,
-        'amount': 91.99181073,
-        'filled': 91.99181073,
-        'remaining': 0.0,
-        'status': 'closed'
-    }
-
-
-@pytest.fixture
-def market_sell_order():
-    return {
-        'id': 'mocked_limit_sell',
-        'type': 'market',
-        'side': 'sell',
-        'symbol': 'mocked',
-        'timestamp': arrow.utcnow().int_timestamp * 1000,
-        'datetime': arrow.utcnow().isoformat(),
-        'price': 0.00004173,
-        'amount': 91.99181073,
-        'filled': 91.99181073,
-        'remaining': 0.0,
-        'status': 'closed'
-    }
 
 
 @pytest.fixture
@@ -1712,6 +1727,7 @@ def limit_buy_order_old_partial():
         'price': 0.00001099,
         'amount': 90.99181073,
         'filled': 23.0,
+        'cost': 90.99181073 * 23.0,
         'remaining': 67.99181073,
         'status': 'open'
     }
@@ -1732,28 +1748,7 @@ def limit_buy_order_canceled_empty(request):
     # https://docs.pytest.org/en/latest/example/parametrize.html#apply-indirect-on-particular-arguments
 
     exchange_name = request.param
-    if exchange_name == 'ftx':
-        return {
-            'info': {},
-            'id': '1234512345',
-            'clientOrderId': None,
-            'timestamp': arrow.utcnow().shift(minutes=-601).int_timestamp * 1000,
-            'datetime': arrow.utcnow().shift(minutes=-601).isoformat(),
-            'lastTradeTimestamp': None,
-            'symbol': 'LTC/USDT',
-            'type': 'limit',
-            'side': 'buy',
-            'price': 34.3225,
-            'amount': 0.55,
-            'cost': 0.0,
-            'average': None,
-            'filled': 0.0,
-            'remaining': 0.0,
-            'status': 'closed',
-            'fee': None,
-            'trades': None
-        }
-    elif exchange_name == 'kraken':
+    if exchange_name == 'kraken':
         return {
             'info': {},
             'id': 'AZNPFF-4AC4N-7MKTAT',
@@ -2302,7 +2297,7 @@ def tickers():
 
 
 @pytest.fixture
-def result(testdatadir):
+def dataframe_1m(testdatadir):
     with (testdatadir / 'UNITTEST_BTC-1m.json').open('r') as data_file:
         return ohlcv_to_dataframe(json.load(data_file), '1m', pair="UNITTEST/BTC",
                                   fill_missing=True)
@@ -2629,7 +2624,7 @@ def open_trade_usdt():
         pair='ADA/USDT',
         open_rate=2.0,
         exchange='binance',
-        open_order_id='123456789',
+        open_order_id='123456789_exit',
         amount=30.0,
         fee_open=0.0,
         fee_close=0.0,
@@ -2654,6 +2649,23 @@ def open_trade_usdt():
             cost=trade.open_rate * trade.amount,
             order_date=trade.open_date,
             order_filled_date=trade.open_date,
+        ),
+        Order(
+            ft_order_side='exit',
+            ft_pair=trade.pair,
+            ft_is_open=True,
+            order_id='123456789_exit',
+            status="open",
+            symbol=trade.pair,
+            order_type="limit",
+            side="sell",
+            price=trade.open_rate,
+            average=trade.open_rate,
+            filled=trade.amount,
+            remaining=0,
+            cost=trade.open_rate * trade.amount,
+            order_date=trade.open_date,
+            order_filled_date=trade.open_date,
         )
     ]
     return trade
@@ -2667,11 +2679,12 @@ def saved_hyperopt_results():
             'params_dict': {
                 'mfi-value': 15, 'fastd-value': 20, 'adx-value': 25, 'rsi-value': 28, 'mfi-enabled': False, 'fastd-enabled': True, 'adx-enabled': True, 'rsi-enabled': True, 'trigger': 'macd_cross_signal', 'sell-mfi-value': 88, 'sell-fastd-value': 97, 'sell-adx-value': 51, 'sell-rsi-value': 67, 'sell-mfi-enabled': False, 'sell-fastd-enabled': False, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-bb_upper', 'roi_t1': 1190, 'roi_t2': 541, 'roi_t3': 408, 'roi_p1': 0.026035863879169705, 'roi_p2': 0.12508730043628782, 'roi_p3': 0.27766427921605896, 'stoploss': -0.2562930402099556},  # noqa: E501
             'params_details': {'buy': {'mfi-value': 15, 'fastd-value': 20, 'adx-value': 25, 'rsi-value': 28, 'mfi-enabled': False, 'fastd-enabled': True, 'adx-enabled': True, 'rsi-enabled': True, 'trigger': 'macd_cross_signal'}, 'sell': {'sell-mfi-value': 88, 'sell-fastd-value': 97, 'sell-adx-value': 51, 'sell-rsi-value': 67, 'sell-mfi-enabled': False, 'sell-fastd-enabled': False, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-bb_upper'}, 'roi': {0: 0.4287874435315165, 408: 0.15112316431545753, 949: 0.026035863879169705, 2139: 0}, 'stoploss': {'stoploss': -0.2562930402099556}},  # noqa: E501
-            'results_metrics': {'total_trades': 2, 'wins': 0, 'draws': 0, 'losses': 2, 'profit_mean': -0.01254995, 'profit_median': -0.012222, 'profit_total': -0.00125625,  'profit_total_abs': -2.50999, 'max_drawdown': 0.23, 'max_drawdown_abs': -0.00125625,  'holding_avg': timedelta(minutes=3930.0), 'stake_currency': 'BTC', 'strategy_name': 'SampleStrategy'},  # noqa: E501
+            'results_metrics': {'total_trades': 2, 'trade_count_long': 2, 'trade_count_short': 0, 'wins': 0, 'draws': 0, 'losses': 2, 'profit_mean': -0.01254995, 'profit_median': -0.012222, 'profit_total': -0.00125625,  'profit_total_abs': -2.50999, 'max_drawdown': 0.23, 'max_drawdown_abs': -0.00125625,  'holding_avg': timedelta(minutes=3930.0), 'stake_currency': 'BTC', 'strategy_name': 'SampleStrategy'},  # noqa: E501
             'results_explanation': '     2 trades. Avg profit  -1.25%. Total profit -0.00125625 BTC (  -2.51Σ%). Avg duration 3930.0 min.',  # noqa: E501
             'total_profit': -0.00125625,
             'current_epoch': 1,
             'is_initial_point': True,
+            'is_random': False,
             'is_best': True,
 
         }, {
@@ -2683,48 +2696,52 @@ def saved_hyperopt_results():
                 'sell': {'sell-mfi-value': 96, 'sell-fastd-value': 68, 'sell-adx-value': 63, 'sell-rsi-value': 81, 'sell-mfi-enabled': False, 'sell-fastd-enabled': True, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-sar_reversal'},  # noqa: E501
                 'roi': {0: 0.4449309386008759, 140: 0.11955965746663, 823: 0.06403981740598495, 1157: 0},  # noqa: E501
                 'stoploss': {'stoploss': -0.338070047333259}},
-            'results_metrics': {'total_trades': 1, 'wins': 0, 'draws': 0, 'losses': 1, 'profit_mean': 0.012357, 'profit_median': -0.012222, 'profit_total': 6.185e-05, 'profit_total_abs': 0.12357, 'max_drawdown': 0.23, 'max_drawdown_abs': -0.00125625, 'holding_avg': timedelta(minutes=1200.0)},  # noqa: E501
+            'results_metrics': {'total_trades': 1, 'trade_count_long': 1, 'trade_count_short': 0, 'wins': 0, 'draws': 0, 'losses': 1, 'profit_mean': 0.012357, 'profit_median': -0.012222, 'profit_total': 6.185e-05, 'profit_total_abs': 0.12357, 'max_drawdown': 0.23, 'max_drawdown_abs': -0.00125625, 'holding_avg': timedelta(minutes=1200.0)},  # noqa: E501
             'results_explanation': '     1 trades. Avg profit   0.12%. Total profit  0.00006185 BTC (   0.12Σ%). Avg duration 1200.0 min.',  # noqa: E501
             'total_profit': 6.185e-05,
             'current_epoch': 2,
             'is_initial_point': True,
+            'is_random': False,
             'is_best': False
         }, {
             'loss': 14.241196856510731,
             'params_dict': {'mfi-value': 25, 'fastd-value': 16, 'adx-value': 29, 'rsi-value': 20, 'mfi-enabled': False, 'fastd-enabled': False, 'adx-enabled': False, 'rsi-enabled': False, 'trigger': 'macd_cross_signal', 'sell-mfi-value': 98, 'sell-fastd-value': 72, 'sell-adx-value': 51, 'sell-rsi-value': 82, 'sell-mfi-enabled': True, 'sell-fastd-enabled': True, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-macd_cross_signal', 'roi_t1': 889, 'roi_t2': 533, 'roi_t3': 263, 'roi_p1': 0.04759065393663096, 'roi_p2': 0.1488819964638463, 'roi_p3': 0.4102801822104605, 'stoploss': -0.05394588767607611},  # noqa: E501
             'params_details': {'buy': {'mfi-value': 25, 'fastd-value': 16, 'adx-value': 29, 'rsi-value': 20, 'mfi-enabled': False, 'fastd-enabled': False, 'adx-enabled': False, 'rsi-enabled': False, 'trigger': 'macd_cross_signal'}, 'sell': {'sell-mfi-value': 98, 'sell-fastd-value': 72, 'sell-adx-value': 51, 'sell-rsi-value': 82, 'sell-mfi-enabled': True, 'sell-fastd-enabled': True, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-macd_cross_signal'}, 'roi': {0: 0.6067528326109377, 263: 0.19647265040047726, 796: 0.04759065393663096, 1685: 0}, 'stoploss': {'stoploss': -0.05394588767607611}},  # noqa: E501
-            'results_metrics': {'total_trades': 621, 'wins': 320, 'draws': 0, 'losses': 301, 'profit_mean': -0.043883302093397747, 'profit_median': -0.012222, 'profit_total': -0.13639474, 'profit_total_abs': -272.515306, 'max_drawdown': 0.25, 'max_drawdown_abs': -272.515306, 'holding_avg': timedelta(minutes=1691.207729468599)},  # noqa: E501
+            'results_metrics': {'total_trades': 621, 'trade_count_long': 621, 'trade_count_short': 0, 'wins': 320, 'draws': 0, 'losses': 301, 'profit_mean': -0.043883302093397747, 'profit_median': -0.012222, 'profit_total': -0.13639474, 'profit_total_abs': -272.515306, 'max_drawdown': 0.25, 'max_drawdown_abs': -272.515306, 'holding_avg': timedelta(minutes=1691.207729468599)},  # noqa: E501
             'results_explanation': '   621 trades. Avg profit  -0.44%. Total profit -0.13639474 BTC (-272.52Σ%). Avg duration 1691.2 min.',  # noqa: E501
             'total_profit': -0.13639474,
             'current_epoch': 3,
             'is_initial_point': True,
+            'is_random': False,
             'is_best': False
         }, {
             'loss': 100000,
             'params_dict': {'mfi-value': 13, 'fastd-value': 35, 'adx-value': 39, 'rsi-value': 29, 'mfi-enabled': True, 'fastd-enabled': False, 'adx-enabled': False, 'rsi-enabled': True, 'trigger': 'macd_cross_signal', 'sell-mfi-value': 87, 'sell-fastd-value': 54, 'sell-adx-value': 63, 'sell-rsi-value': 93, 'sell-mfi-enabled': False, 'sell-fastd-enabled': True, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-bb_upper', 'roi_t1': 1402, 'roi_t2': 676, 'roi_t3': 215, 'roi_p1': 0.06264755784937427, 'roi_p2': 0.14258587851894644, 'roi_p3': 0.20671291201040828, 'stoploss': -0.11818343570194478},  # noqa: E501
             'params_details': {'buy': {'mfi-value': 13, 'fastd-value': 35, 'adx-value': 39, 'rsi-value': 29, 'mfi-enabled': True, 'fastd-enabled': False, 'adx-enabled': False, 'rsi-enabled': True, 'trigger': 'macd_cross_signal'}, 'sell': {'sell-mfi-value': 87, 'sell-fastd-value': 54, 'sell-adx-value': 63, 'sell-rsi-value': 93, 'sell-mfi-enabled': False, 'sell-fastd-enabled': True, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-bb_upper'}, 'roi': {0: 0.411946348378729, 215: 0.2052334363683207, 891: 0.06264755784937427, 2293: 0}, 'stoploss': {'stoploss': -0.11818343570194478}},  # noqa: E501
-            'results_metrics': {'total_trades': 0, 'wins': 0, 'draws': 0, 'losses': 0, 'profit_mean': None, 'profit_median': None, 'profit_total': 0, 'profit': 0.0, 'holding_avg': timedelta()},  # noqa: E501
+            'results_metrics': {'total_trades': 0, 'trade_count_long': 0, 'trade_count_short': 0, 'wins': 0, 'draws': 0, 'losses': 0, 'profit_mean': None, 'profit_median': None, 'profit_total': 0, 'profit': 0.0, 'holding_avg': timedelta()},  # noqa: E501
             'results_explanation': '     0 trades. Avg profit    nan%. Total profit  0.00000000 BTC (   0.00Σ%). Avg duration   nan min.',  # noqa: E501
-            'total_profit': 0, 'current_epoch': 4, 'is_initial_point': True, 'is_best': False
+            'total_profit': 0, 'current_epoch': 4, 'is_initial_point': True, 'is_random': False, 'is_best': False  # noqa: E501
         }, {
             'loss': 0.22195522184191518,
             'params_dict': {'mfi-value': 17, 'fastd-value': 21, 'adx-value': 38, 'rsi-value': 33, 'mfi-enabled': True, 'fastd-enabled': False, 'adx-enabled': True, 'rsi-enabled': False, 'trigger': 'macd_cross_signal', 'sell-mfi-value': 87, 'sell-fastd-value': 82, 'sell-adx-value': 78, 'sell-rsi-value': 69, 'sell-mfi-enabled': True, 'sell-fastd-enabled': False, 'sell-adx-enabled': True, 'sell-rsi-enabled': False, 'sell-trigger': 'sell-macd_cross_signal', 'roi_t1': 1269, 'roi_t2': 601, 'roi_t3': 444, 'roi_p1': 0.07280999507931168, 'roi_p2': 0.08946698095898986, 'roi_p3': 0.1454876733325284, 'stoploss': -0.18181041180901014},   # noqa: E501
             'params_details': {'buy': {'mfi-value': 17, 'fastd-value': 21, 'adx-value': 38, 'rsi-value': 33, 'mfi-enabled': True, 'fastd-enabled': False, 'adx-enabled': True, 'rsi-enabled': False, 'trigger': 'macd_cross_signal'}, 'sell': {'sell-mfi-value': 87, 'sell-fastd-value': 82, 'sell-adx-value': 78, 'sell-rsi-value': 69, 'sell-mfi-enabled': True, 'sell-fastd-enabled': False, 'sell-adx-enabled': True, 'sell-rsi-enabled': False, 'sell-trigger': 'sell-macd_cross_signal'}, 'roi': {0: 0.3077646493708299, 444: 0.16227697603830155, 1045: 0.07280999507931168, 2314: 0}, 'stoploss': {'stoploss': -0.18181041180901014}},  # noqa: E501
-            'results_metrics': {'total_trades': 14, 'wins': 6, 'draws': 0, 'losses': 8, 'profit_mean': -0.003539515, 'profit_median': -0.012222, 'profit_total': -0.002480140000000001, 'profit_total_abs': -4.955321, 'max_drawdown': 0.34, 'max_drawdown_abs': -4.955321, 'holding_avg': timedelta(minutes=3402.8571428571427)},  # noqa: E501
+            'results_metrics': {'total_trades': 14, 'trade_count_long': 14, 'trade_count_short': 0, 'wins': 6, 'draws': 0, 'losses': 8, 'profit_mean': -0.003539515, 'profit_median': -0.012222, 'profit_total': -0.002480140000000001, 'profit_total_abs': -4.955321, 'max_drawdown': 0.34, 'max_drawdown_abs': -4.955321, 'holding_avg': timedelta(minutes=3402.8571428571427)},  # noqa: E501
             'results_explanation': '    14 trades. Avg profit  -0.35%. Total profit -0.00248014 BTC (  -4.96Σ%). Avg duration 3402.9 min.',  # noqa: E501
             'total_profit': -0.002480140000000001,
             'current_epoch': 5,
             'is_initial_point': True,
+            'is_random': False,
             'is_best': True
         }, {
             'loss': 0.545315889154162,
             'params_dict': {'mfi-value': 22, 'fastd-value': 43, 'adx-value': 46, 'rsi-value': 20, 'mfi-enabled': False, 'fastd-enabled': False, 'adx-enabled': True, 'rsi-enabled': True, 'trigger': 'bb_lower', 'sell-mfi-value': 87, 'sell-fastd-value': 65, 'sell-adx-value': 94, 'sell-rsi-value': 63, 'sell-mfi-enabled': False, 'sell-fastd-enabled': True, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-macd_cross_signal', 'roi_t1': 319, 'roi_t2': 556, 'roi_t3': 216, 'roi_p1': 0.06251955472249589, 'roi_p2': 0.11659519602202795, 'roi_p3': 0.0953744132197762, 'stoploss': -0.024551752215582423},  # noqa: E501
             'params_details': {'buy': {'mfi-value': 22, 'fastd-value': 43, 'adx-value': 46, 'rsi-value': 20, 'mfi-enabled': False, 'fastd-enabled': False, 'adx-enabled': True, 'rsi-enabled': True, 'trigger': 'bb_lower'}, 'sell': {'sell-mfi-value': 87, 'sell-fastd-value': 65, 'sell-adx-value': 94, 'sell-rsi-value': 63, 'sell-mfi-enabled': False, 'sell-fastd-enabled': True, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-macd_cross_signal'}, 'roi': {0: 0.2744891639643, 216: 0.17911475074452382, 772: 0.06251955472249589, 1091: 0}, 'stoploss': {'stoploss': -0.024551752215582423}},  # noqa: E501
-            'results_metrics': {'total_trades': 39, 'wins': 20, 'draws': 0, 'losses': 19, 'profit_mean': -0.0021400679487179478, 'profit_median': -0.012222, 'profit_total': -0.0041773, 'profit_total_abs': -8.346264999999997, 'max_drawdown': 0.45, 'max_drawdown_abs': -4.955321, 'holding_avg': timedelta(minutes=636.9230769230769)},  # noqa: E501
+            'results_metrics': {'total_trades': 39, 'trade_count_long': 39, 'trade_count_short': 0, 'wins': 20, 'draws': 0, 'losses': 19, 'profit_mean': -0.0021400679487179478, 'profit_median': -0.012222, 'profit_total': -0.0041773, 'profit_total_abs': -8.346264999999997, 'max_drawdown': 0.45, 'max_drawdown_abs': -4.955321, 'holding_avg': timedelta(minutes=636.9230769230769)},  # noqa: E501
             'results_explanation': '    39 trades. Avg profit  -0.21%. Total profit -0.00417730 BTC (  -8.35Σ%). Avg duration 636.9 min.',  # noqa: E501
             'total_profit': -0.0041773,
             'current_epoch': 6,
             'is_initial_point': True,
+            'is_random': False,
             'is_best': False
         }, {
             'loss': 4.713497421432944,
@@ -2732,62 +2749,68 @@ def saved_hyperopt_results():
             'params_details': {
                 'buy': {'mfi-value': 13, 'fastd-value': 41, 'adx-value': 21, 'rsi-value': 29, 'mfi-enabled': False, 'fastd-enabled': True, 'adx-enabled': False, 'rsi-enabled': False, 'trigger': 'bb_lower'}, 'sell': {'sell-mfi-value': 99, 'sell-fastd-value': 60, 'sell-adx-value': 81, 'sell-rsi-value': 69, 'sell-mfi-enabled': True, 'sell-fastd-enabled': True, 'sell-adx-enabled': True, 'sell-rsi-enabled': False, 'sell-trigger': 'sell-macd_cross_signal'}, 'roi': {0: 0.4837436938134452, 145: 0.10853310701097472, 765: 0.0586919200378493, 1536: 0},  # noqa: E501
                 'stoploss': {'stoploss': -0.14613268022709905}},  # noqa: E501
-            'results_metrics': {'total_trades': 318, 'wins': 100, 'draws': 0, 'losses': 218, 'profit_mean': -0.0039833954716981146, 'profit_median': -0.012222, 'profit_total': -0.06339929, 'profit_total_abs': -126.67197600000004, 'max_drawdown': 0.50, 'max_drawdown_abs': -200.955321, 'holding_avg': timedelta(minutes=3140.377358490566)},  # noqa: E501
+            'results_metrics': {'total_trades': 318, 'trade_count_long': 318, 'trade_count_short': 0, 'wins': 100, 'draws': 0, 'losses': 218, 'profit_mean': -0.0039833954716981146, 'profit_median': -0.012222, 'profit_total': -0.06339929, 'profit_total_abs': -126.67197600000004, 'max_drawdown': 0.50, 'max_drawdown_abs': -200.955321, 'holding_avg': timedelta(minutes=3140.377358490566)},  # noqa: E501
             'results_explanation': '   318 trades. Avg profit  -0.40%. Total profit -0.06339929 BTC (-126.67Σ%). Avg duration 3140.4 min.',  # noqa: E501
             'total_profit': -0.06339929,
             'current_epoch': 7,
             'is_initial_point': True,
+            'is_random': False,
             'is_best': False
         }, {
             'loss': 20.0,  # noqa: E501
             'params_dict': {'mfi-value': 24, 'fastd-value': 43, 'adx-value': 33, 'rsi-value': 20, 'mfi-enabled': False, 'fastd-enabled': True, 'adx-enabled': True, 'rsi-enabled': True, 'trigger': 'sar_reversal', 'sell-mfi-value': 89, 'sell-fastd-value': 74, 'sell-adx-value': 70, 'sell-rsi-value': 70, 'sell-mfi-enabled': False, 'sell-fastd-enabled': False, 'sell-adx-enabled': False, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-sar_reversal', 'roi_t1': 1149, 'roi_t2': 375, 'roi_t3': 289, 'roi_p1': 0.05571820757172588, 'roi_p2': 0.0606240398618907, 'roi_p3': 0.1729012220156157, 'stoploss': -0.1588514289110401},  # noqa: E501
             'params_details': {'buy': {'mfi-value': 24, 'fastd-value': 43, 'adx-value': 33, 'rsi-value': 20, 'mfi-enabled': False, 'fastd-enabled': True, 'adx-enabled': True, 'rsi-enabled': True, 'trigger': 'sar_reversal'}, 'sell': {'sell-mfi-value': 89, 'sell-fastd-value': 74, 'sell-adx-value': 70, 'sell-rsi-value': 70, 'sell-mfi-enabled': False, 'sell-fastd-enabled': False, 'sell-adx-enabled': False, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-sar_reversal'}, 'roi': {0: 0.2892434694492323, 289: 0.11634224743361658, 664: 0.05571820757172588, 1813: 0}, 'stoploss': {'stoploss': -0.1588514289110401}},  # noqa: E501
-            'results_metrics': {'total_trades': 1, 'wins': 0, 'draws': 1, 'losses': 0, 'profit_mean': 0.0, 'profit_median': 0.0, 'profit_total': 0.0, 'profit_total_abs': 0.0, 'max_drawdown': 0.0, 'max_drawdown_abs': 0.52, 'holding_avg': timedelta(minutes=5340.0)},  # noqa: E501
+            'results_metrics': {'total_trades': 1, 'trade_count_long': 1, 'trade_count_short': 0, 'wins': 0, 'draws': 1, 'losses': 0, 'profit_mean': 0.0, 'profit_median': 0.0, 'profit_total': 0.0, 'profit_total_abs': 0.0, 'max_drawdown': 0.0, 'max_drawdown_abs': 0.52, 'holding_avg': timedelta(minutes=5340.0)},  # noqa: E501
             'results_explanation': '     1 trades. Avg profit   0.00%. Total profit  0.00000000 BTC (   0.00Σ%). Avg duration 5340.0 min.',  # noqa: E501
             'total_profit': 0.0,
             'current_epoch': 8,
             'is_initial_point': True,
+            'is_random': False,
             'is_best': False
         }, {
             'loss': 2.4731817780991223,
             'params_dict': {'mfi-value': 22, 'fastd-value': 20, 'adx-value': 29, 'rsi-value': 40, 'mfi-enabled': False, 'fastd-enabled': False, 'adx-enabled': False, 'rsi-enabled': False, 'trigger': 'sar_reversal', 'sell-mfi-value': 97, 'sell-fastd-value': 65, 'sell-adx-value': 81, 'sell-rsi-value': 64, 'sell-mfi-enabled': True, 'sell-fastd-enabled': True, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-bb_upper', 'roi_t1': 1012, 'roi_t2': 584, 'roi_t3': 422, 'roi_p1': 0.036764323603472565, 'roi_p2': 0.10335480573205287, 'roi_p3': 0.10322347377503042, 'stoploss': -0.2780610808108503},  # noqa: E501
             'params_details': {'buy': {'mfi-value': 22, 'fastd-value': 20, 'adx-value': 29, 'rsi-value': 40, 'mfi-enabled': False, 'fastd-enabled': False, 'adx-enabled': False, 'rsi-enabled': False, 'trigger': 'sar_reversal'}, 'sell': {'sell-mfi-value': 97, 'sell-fastd-value': 65, 'sell-adx-value': 81, 'sell-rsi-value': 64, 'sell-mfi-enabled': True, 'sell-fastd-enabled': True, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-bb_upper'}, 'roi': {0: 0.2433426031105559, 422: 0.14011912933552545, 1006: 0.036764323603472565, 2018: 0}, 'stoploss': {'stoploss': -0.2780610808108503}},  # noqa: E501
-            'results_metrics': {'total_trades': 229, 'wins': 150, 'draws': 0, 'losses': 79, 'profit_mean': -0.0038433433624454144, 'profit_median': -0.012222, 'profit_total': -0.044050070000000004, 'profit_total_abs': -88.01256299999999, 'max_drawdown': 0.41, 'max_drawdown_abs': -150.955321, 'holding_avg': timedelta(minutes=6505.676855895196)},  # noqa: E501
+            'results_metrics': {'total_trades': 229, 'trade_count_long': 229, 'trade_count_short': 0, 'wins': 150, 'draws': 0, 'losses': 79, 'profit_mean': -0.0038433433624454144, 'profit_median': -0.012222, 'profit_total': -0.044050070000000004, 'profit_total_abs': -88.01256299999999, 'max_drawdown': 0.41, 'max_drawdown_abs': -150.955321, 'holding_avg': timedelta(minutes=6505.676855895196)},  # noqa: E501
             'results_explanation': '   229 trades. Avg profit  -0.38%. Total profit -0.04405007 BTC ( -88.01Σ%). Avg duration 6505.7 min.',  # noqa: E501
             'total_profit': -0.044050070000000004,  # noqa: E501
             'current_epoch': 9,
             'is_initial_point': True,
+            'is_random': False,
             'is_best': False
         }, {
             'loss': -0.2604606005845212,  # noqa: E501
             'params_dict': {'mfi-value': 23, 'fastd-value': 24, 'adx-value': 22, 'rsi-value': 24, 'mfi-enabled': False, 'fastd-enabled': False, 'adx-enabled': False, 'rsi-enabled': True, 'trigger': 'macd_cross_signal', 'sell-mfi-value': 97, 'sell-fastd-value': 70, 'sell-adx-value': 64, 'sell-rsi-value': 80, 'sell-mfi-enabled': False, 'sell-fastd-enabled': True, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-sar_reversal', 'roi_t1': 792, 'roi_t2': 464, 'roi_t3': 215, 'roi_p1': 0.04594053535385903, 'roi_p2': 0.09623192684243963, 'roi_p3': 0.04428219070850663, 'stoploss': -0.16992287161634415},  # noqa: E501
             'params_details': {'buy': {'mfi-value': 23, 'fastd-value': 24, 'adx-value': 22, 'rsi-value': 24, 'mfi-enabled': False, 'fastd-enabled': False, 'adx-enabled': False, 'rsi-enabled': True, 'trigger': 'macd_cross_signal'}, 'sell': {'sell-mfi-value': 97, 'sell-fastd-value': 70, 'sell-adx-value': 64, 'sell-rsi-value': 80, 'sell-mfi-enabled': False, 'sell-fastd-enabled': True, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-sar_reversal'}, 'roi': {0: 0.18645465290480528, 215: 0.14217246219629864, 679: 0.04594053535385903, 1471: 0}, 'stoploss': {'stoploss': -0.16992287161634415}},  # noqa: E501
-            'results_metrics': {'total_trades': 4, 'wins': 0, 'draws': 0, 'losses': 4, 'profit_mean': 0.001080385, 'profit_median': -0.012222, 'profit_total': 0.00021629, 'profit_total_abs': 0.432154, 'max_drawdown': 0.13, 'max_drawdown_abs': -4.955321, 'holding_avg': timedelta(minutes=2850.0)},  # noqa: E501
+            'results_metrics': {'total_trades': 4, 'trade_count_long': 4, 'trade_count_short': 0, 'wins': 0, 'draws': 0, 'losses': 4, 'profit_mean': 0.001080385, 'profit_median': -0.012222, 'profit_total': 0.00021629, 'profit_total_abs': 0.432154, 'max_drawdown': 0.13, 'max_drawdown_abs': -4.955321, 'holding_avg': timedelta(minutes=2850.0)},  # noqa: E501
             'results_explanation': '     4 trades. Avg profit   0.11%. Total profit  0.00021629 BTC (   0.43Σ%). Avg duration 2850.0 min.',  # noqa: E501
             'total_profit': 0.00021629,
             'current_epoch': 10,
             'is_initial_point': True,
+            'is_random': False,
             'is_best': True
         }, {
             'loss': 4.876465945994304,  # noqa: E501
             'params_dict': {'mfi-value': 20, 'fastd-value': 32, 'adx-value': 49, 'rsi-value': 23, 'mfi-enabled': True, 'fastd-enabled': True, 'adx-enabled': False, 'rsi-enabled': False, 'trigger': 'bb_lower', 'sell-mfi-value': 75, 'sell-fastd-value': 56, 'sell-adx-value': 61, 'sell-rsi-value': 62, 'sell-mfi-enabled': False, 'sell-fastd-enabled': False, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-macd_cross_signal', 'roi_t1': 579, 'roi_t2': 614, 'roi_t3': 273, 'roi_p1': 0.05307643172744114, 'roi_p2': 0.1352282078262871, 'roi_p3': 0.1913307406325751, 'stoploss': -0.25728526022513887},  # noqa: E501
             'params_details': {'buy': {'mfi-value': 20, 'fastd-value': 32, 'adx-value': 49, 'rsi-value': 23, 'mfi-enabled': True, 'fastd-enabled': True, 'adx-enabled': False, 'rsi-enabled': False, 'trigger': 'bb_lower'}, 'sell': {'sell-mfi-value': 75, 'sell-fastd-value': 56, 'sell-adx-value': 61, 'sell-rsi-value': 62, 'sell-mfi-enabled': False, 'sell-fastd-enabled': False, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-macd_cross_signal'}, 'roi': {0: 0.3796353801863034, 273: 0.18830463955372825, 887: 0.05307643172744114, 1466: 0}, 'stoploss': {'stoploss': -0.25728526022513887}},  # noqa: E501
             # New Hyperopt mode!
-            'results_metrics': {'total_trades': 117, 'wins': 67, 'draws': 0, 'losses': 50, 'profit_mean': -0.012698609145299145, 'profit_median': -0.012222, 'profit_total': -0.07436117, 'profit_total_abs': -148.573727, 'max_drawdown': 0.52, 'max_drawdown_abs': -224.955321, 'holding_avg': timedelta(minutes=4282.5641025641025)},  # noqa: E501
+            'results_metrics': {'total_trades': 117, 'trade_count_long': 117, 'trade_count_short': 0, 'wins': 67, 'draws': 0, 'losses': 50, 'profit_mean': -0.012698609145299145, 'profit_median': -0.012222, 'profit_total': -0.07436117, 'profit_total_abs': -148.573727, 'max_drawdown': 0.52, 'max_drawdown_abs': -224.955321, 'holding_avg': timedelta(minutes=4282.5641025641025)},  # noqa: E501
             'results_explanation': '   117 trades. Avg profit  -1.27%. Total profit -0.07436117 BTC (-148.57Σ%). Avg duration 4282.6 min.',  # noqa: E501
             'total_profit': -0.07436117,
             'current_epoch': 11,
             'is_initial_point': True,
+            'is_random': False,
             'is_best': False
         }, {
             'loss': 100000,
             'params_dict': {'mfi-value': 10, 'fastd-value': 36, 'adx-value': 31, 'rsi-value': 22, 'mfi-enabled': True, 'fastd-enabled': True, 'adx-enabled': True, 'rsi-enabled': False, 'trigger': 'sar_reversal', 'sell-mfi-value': 80, 'sell-fastd-value': 71, 'sell-adx-value': 60, 'sell-rsi-value': 85, 'sell-mfi-enabled': False, 'sell-fastd-enabled': False, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-bb_upper', 'roi_t1': 1156, 'roi_t2': 581, 'roi_t3': 408, 'roi_p1': 0.06860454019988212, 'roi_p2': 0.12473718444931989, 'roi_p3': 0.2896360635226823, 'stoploss': -0.30889015124682806},  # noqa: E501
             'params_details': {'buy': {'mfi-value': 10, 'fastd-value': 36, 'adx-value': 31, 'rsi-value': 22, 'mfi-enabled': True, 'fastd-enabled': True, 'adx-enabled': True, 'rsi-enabled': False, 'trigger': 'sar_reversal'}, 'sell': {'sell-mfi-value': 80, 'sell-fastd-value': 71, 'sell-adx-value': 60, 'sell-rsi-value': 85, 'sell-mfi-enabled': False, 'sell-fastd-enabled': False, 'sell-adx-enabled': True, 'sell-rsi-enabled': True, 'sell-trigger': 'sell-bb_upper'}, 'roi': {0: 0.4829777881718843, 408: 0.19334172464920202, 989: 0.06860454019988212, 2145: 0}, 'stoploss': {'stoploss': -0.30889015124682806}},  # noqa: E501
-            'results_metrics': {'total_trades': 0, 'wins': 0, 'draws': 0, 'losses': 0, 'profit_mean': None, 'profit_median': None, 'profit_total': 0, 'profit_total_abs': 0.0, 'max_drawdown': 0.0, 'max_drawdown_abs': 0.0, 'holding_avg': timedelta()},  # noqa: E501
+            'results_metrics': {'total_trades': 0, 'trade_count_long': 0, 'trade_count_short': 0, 'wins': 0, 'draws': 0, 'losses': 0, 'profit_mean': None, 'profit_median': None, 'profit_total': 0, 'profit_total_abs': 0.0, 'max_drawdown': 0.0, 'max_drawdown_abs': 0.0, 'holding_avg': timedelta()},  # noqa: E501
             'results_explanation': '     0 trades. Avg profit    nan%. Total profit  0.00000000 BTC (   0.00Σ%). Avg duration   nan min.',  # noqa: E501
             'total_profit': 0,
             'current_epoch': 12,
             'is_initial_point': True,
+            'is_random': False,
             'is_best': False
             }
     ]
@@ -2809,6 +2832,7 @@ def limit_buy_order_usdt_open():
         'datetime': arrow.utcnow().isoformat(),
         'timestamp': arrow.utcnow().int_timestamp * 1000,
         'price': 2.00,
+        'average': 2.00,
         'amount': 30.0,
         'filled': 0.0,
         'cost': 60.0,
@@ -2932,14 +2956,6 @@ def limit_order(limit_buy_order_usdt, limit_sell_order_usdt):
     return {
         'buy': limit_buy_order_usdt,
         'sell': limit_sell_order_usdt
-    }
-
-
-@pytest.fixture(scope='function')
-def market_order(market_buy_order_usdt, market_sell_order_usdt):
-    return {
-        'buy': market_buy_order_usdt,
-        'sell': market_sell_order_usdt
     }
 
 
@@ -3084,430 +3100,416 @@ def leverage_tiers():
     return {
         "1000SHIB/USDT": [
             {
-                'min': 0,
-                'max': 50000,
-                'mmr': 0.01,
-                'lev': 50,
+                'minNotional': 0,
+                'maxNotional': 50000,
+                'maintenanceMarginRate': 0.01,
+                'maxLeverage': 50,
                 'maintAmt': 0.0
             },
             {
-                'min': 50000,
-                'max': 150000,
-                'mmr': 0.025,
-                'lev': 20,
+                'minNotional': 50000,
+                'maxNotional': 150000,
+                'maintenanceMarginRate': 0.025,
+                'maxLeverage': 20,
                 'maintAmt': 750.0
             },
             {
-                'min': 150000,
-                'max': 250000,
-                'mmr': 0.05,
-                'lev': 10,
+                'minNotional': 150000,
+                'maxNotional': 250000,
+                'maintenanceMarginRate': 0.05,
+                'maxLeverage': 10,
                 'maintAmt': 4500.0
             },
             {
-                'min': 250000,
-                'max': 500000,
-                'mmr': 0.1,
-                'lev': 5,
+                'minNotional': 250000,
+                'maxNotional': 500000,
+                'maintenanceMarginRate': 0.1,
+                'maxLeverage': 5,
                 'maintAmt': 17000.0
             },
             {
-                'min': 500000,
-                'max': 1000000,
-                'mmr': 0.125,
-                'lev': 4,
+                'minNotional': 500000,
+                'maxNotional': 1000000,
+                'maintenanceMarginRate': 0.125,
+                'maxLeverage': 4,
                 'maintAmt': 29500.0
             },
             {
-                'min': 1000000,
-                'max': 2000000,
-                'mmr': 0.25,
-                'lev': 2,
+                'minNotional': 1000000,
+                'maxNotional': 2000000,
+                'maintenanceMarginRate': 0.25,
+                'maxLeverage': 2,
                 'maintAmt': 154500.0
             },
             {
-                'min': 2000000,
-                'max': 30000000,
-                'mmr': 0.5,
-                'lev': 1,
+                'minNotional': 2000000,
+                'maxNotional': 30000000,
+                'maintenanceMarginRate': 0.5,
+                'maxLeverage': 1,
                 'maintAmt': 654500.0
             },
         ],
         "1INCH/USDT": [
             {
-                'min': 0,
-                'max': 5000,
-                'mmr': 0.012,
-                'lev': 50,
+                'minNotional': 0,
+                'maxNotional': 5000,
+                'maintenanceMarginRate': 0.012,
+                'maxLeverage': 50,
                 'maintAmt': 0.0
             },
             {
-                'min': 5000,
-                'max': 25000,
-                'mmr': 0.025,
-                'lev': 20,
+                'minNotional': 5000,
+                'maxNotional': 25000,
+                'maintenanceMarginRate': 0.025,
+                'maxLeverage': 20,
                 'maintAmt': 65.0
             },
             {
-                'min': 25000,
-                'max': 100000,
-                'mmr': 0.05,
-                'lev': 10,
+                'minNotional': 25000,
+                'maxNotional': 100000,
+                'maintenanceMarginRate': 0.05,
+                'maxLeverage': 10,
                 'maintAmt': 690.0
             },
             {
-                'min': 100000,
-                'max': 250000,
-                'mmr': 0.1,
-                'lev': 5,
+                'minNotional': 100000,
+                'maxNotional': 250000,
+                'maintenanceMarginRate': 0.1,
+                'maxLeverage': 5,
                 'maintAmt': 5690.0
             },
             {
-                'min': 250000,
-                'max': 1000000,
-                'mmr': 0.125,
-                'lev': 2,
+                'minNotional': 250000,
+                'maxNotional': 1000000,
+                'maintenanceMarginRate': 0.125,
+                'maxLeverage': 2,
                 'maintAmt': 11940.0
             },
             {
-                'min': 1000000,
-                'max': 100000000,
-                'mmr': 0.5,
-                'lev': 1,
+                'minNotional': 1000000,
+                'maxNotional': 100000000,
+                'maintenanceMarginRate': 0.5,
+                'maxLeverage': 1,
                 'maintAmt': 386940.0
             },
         ],
         "AAVE/USDT": [
             {
-                'min': 0,
-                'max': 50000,
-                'mmr': 0.01,
-                'lev': 50,
+                'minNotional': 0,
+                'maxNotional': 5000,
+                'maintenanceMarginRate': 0.01,
+                'maxLeverage': 50,
                 'maintAmt': 0.0
             },
             {
-                'min': 50000,
-                'max': 250000,
-                'mmr': 0.02,
-                'lev': 25,
-                'maintAmt': 500.0
+                'minNotional': 5000,
+                'maxNotional': 25000,
+                'maintenanceMarginRate': 0.02,
+                'maxLeverage': 25,
+                'maintAmt': 75.0
             },
             {
-                'min': 250000,
-                'max': 1000000,
-                'mmr': 0.05,
-                'lev': 10,
-                'maintAmt': 8000.0
+                'minNotional': 25000,
+                'maxNotional': 100000,
+                'maintenanceMarginRate': 0.05,
+                'maxLeverage': 10,
+                'maintAmt': 700.0
             },
             {
-                'min': 1000000,
-                'max': 2000000,
-                'mmr': 0.1,
-                'lev': 5,
-                'maintAmt': 58000.0
+                'minNotional': 100000,
+                'maxNotional': 250000,
+                'maintenanceMarginRate': 0.1,
+                'maxLeverage': 5,
+                'maintAmt': 5700.0
             },
             {
-                'min': 2000000,
-                'max': 5000000,
-                'mmr': 0.125,
-                'lev': 4,
-                'maintAmt': 108000.0
+                'minNotional': 250000,
+                'maxNotional': 1000000,
+                'maintenanceMarginRate': 0.125,
+                'maxLeverage': 2,
+                'maintAmt': 11950.0
             },
             {
-                'min': 5000000,
-                'max': 10000000,
-                'mmr': 0.1665,
-                'lev': 3,
-                'maintAmt': 315500.0
+                'minNotional': 10000000,
+                'maxNotional': 50000000,
+                'maintenanceMarginRate': 0.5,
+                'maxLeverage': 1,
+                'maintAmt': 386950.0
             },
-            {
-                'min': 10000000,
-                'max': 20000000,
-                'mmr': 0.25,
-                'lev': 2,
-                'maintAmt': 1150500.0
-            },
-            {
-                "min": 20000000,
-                "max": 50000000,
-                "mmr": 0.5,
-                "lev": 1,
-                "maintAmt": 6150500.0
-            }
         ],
         "ADA/BUSD": [
             {
-                "min": 0,
-                "max": 100000,
-                "mmr": 0.025,
-                "lev": 20,
+                "minNotional": 0,
+                "maxNotional": 100000,
+                "maintenanceMarginRate": 0.025,
+                "maxLeverage": 20,
                 "maintAmt": 0.0
             },
             {
-                "min": 100000,
-                "max": 500000,
-                "mmr": 0.05,
-                "lev": 10,
+                "minNotional": 100000,
+                "maxNotional": 500000,
+                "maintenanceMarginRate": 0.05,
+                "maxLeverage": 10,
                 "maintAmt": 2500.0
             },
             {
-                "min": 500000,
-                "max": 1000000,
-                "mmr": 0.1,
-                "lev": 5,
+                "minNotional": 500000,
+                "maxNotional": 1000000,
+                "maintenanceMarginRate": 0.1,
+                "maxLeverage": 5,
                 "maintAmt": 27500.0
             },
             {
-                "min": 1000000,
-                "max": 2000000,
-                "mmr": 0.15,
-                "lev": 3,
+                "minNotional": 1000000,
+                "maxNotional": 2000000,
+                "maintenanceMarginRate": 0.15,
+                "maxLeverage": 3,
                 "maintAmt": 77500.0
             },
             {
-                "min": 2000000,
-                "max": 5000000,
-                "mmr": 0.25,
-                "lev": 2,
+                "minNotional": 2000000,
+                "maxNotional": 5000000,
+                "maintenanceMarginRate": 0.25,
+                "maxLeverage": 2,
                 "maintAmt": 277500.0
             },
             {
-                "min": 5000000,
-                "max": 30000000,
-                "mmr": 0.5,
-                "lev": 1,
+                "minNotional": 5000000,
+                "maxNotional": 30000000,
+                "maintenanceMarginRate": 0.5,
+                "maxLeverage": 1,
                 "maintAmt": 1527500.0
             },
         ],
         'BNB/BUSD': [
             {
-                "min": 0,       # stake(before leverage) = 0
-                "max": 100000,  # max stake(before leverage) = 5000
-                "mmr": 0.025,
-                "lev": 20,
+                "minNotional": 0,       # stake(before leverage) = 0
+                "maxNotional": 100000,  # max stake(before leverage) = 5000
+                "maintenanceMarginRate": 0.025,
+                "maxLeverage": 20,
                 "maintAmt": 0.0
             },
             {
-                "min": 100000,  # stake = 10000.0
-                "max": 500000,  # max_stake = 50000.0
-                "mmr": 0.05,
-                "lev": 10,
+                "minNotional": 100000,  # stake = 10000.0
+                "maxNotional": 500000,  # max_stake = 50000.0
+                "maintenanceMarginRate": 0.05,
+                "maxLeverage": 10,
                 "maintAmt": 2500.0
             },
             {
-                "min": 500000,   # stake = 100000.0
-                "max": 1000000,  # max_stake = 200000.0
-                "mmr": 0.1,
-                "lev": 5,
+                "minNotional": 500000,   # stake = 100000.0
+                "maxNotional": 1000000,  # max_stake = 200000.0
+                "maintenanceMarginRate": 0.1,
+                "maxLeverage": 5,
                 "maintAmt": 27500.0
             },
             {
-                "min": 1000000,  # stake = 333333.3333333333
-                "max": 2000000,  # max_stake = 666666.6666666666
-                "mmr": 0.15,
-                "lev": 3,
+                "minNotional": 1000000,  # stake = 333333.3333333333
+                "maxNotional": 2000000,  # max_stake = 666666.6666666666
+                "maintenanceMarginRate": 0.15,
+                "maxLeverage": 3,
                 "maintAmt": 77500.0
             },
             {
-                "min": 2000000,  # stake = 1000000.0
-                "max": 5000000,  # max_stake = 2500000.0
-                "mmr": 0.25,
-                "lev": 2,
+                "minNotional": 2000000,  # stake = 1000000.0
+                "maxNotional": 5000000,  # max_stake = 2500000.0
+                "maintenanceMarginRate": 0.25,
+                "maxLeverage": 2,
                 "maintAmt": 277500.0
             },
             {
-                "min": 5000000,   # stake = 5000000.0
-                "max": 30000000,  # max_stake = 30000000.0
-                "mmr": 0.5,
-                "lev": 1,
+                "minNotional": 5000000,   # stake = 5000000.0
+                "maxNotional": 30000000,  # max_stake = 30000000.0
+                "maintenanceMarginRate": 0.5,
+                "maxLeverage": 1,
                 "maintAmt": 1527500.0
             }
         ],
         'BNB/USDT': [
             {
-                "min": 0,      # stake = 0.0
-                "max": 10000,  # max_stake = 133.33333333333334
-                "mmr": 0.0065,
-                "lev": 75,
+                "minNotional": 0,      # stake = 0.0
+                "maxNotional": 10000,  # max_stake = 133.33333333333334
+                "maintenanceMarginRate": 0.0065,
+                "maxLeverage": 75,
                 "maintAmt": 0.0
             },
             {
-                "min": 10000,  # stake = 200.0
-                "max": 50000,  # max_stake = 1000.0
-                "mmr": 0.01,
-                "lev": 50,
+                "minNotional": 10000,  # stake = 200.0
+                "maxNotional": 50000,  # max_stake = 1000.0
+                "maintenanceMarginRate": 0.01,
+                "maxLeverage": 50,
                 "maintAmt": 35.0
             },
             {
-                "min": 50000,   # stake = 2000.0
-                "max": 250000,  # max_stake = 10000.0
-                "mmr": 0.02,
-                "lev": 25,
+                "minNotional": 50000,   # stake = 2000.0
+                "maxNotional": 250000,  # max_stake = 10000.0
+                "maintenanceMarginRate": 0.02,
+                "maxLeverage": 25,
                 "maintAmt": 535.0
             },
             {
-                "min": 250000,   # stake = 25000.0
-                "max": 1000000,  # max_stake = 100000.0
-                "mmr": 0.05,
-                "lev": 10,
+                "minNotional": 250000,   # stake = 25000.0
+                "maxNotional": 1000000,  # max_stake = 100000.0
+                "maintenanceMarginRate": 0.05,
+                "maxLeverage": 10,
                 "maintAmt": 8035.0
             },
             {
-                "min": 1000000,  # stake = 200000.0
-                "max": 2000000,  # max_stake = 400000.0
-                "mmr": 0.1,
-                "lev": 5,
+                "minNotional": 1000000,  # stake = 200000.0
+                "maxNotional": 2000000,  # max_stake = 400000.0
+                "maintenanceMarginRate": 0.1,
+                "maxLeverage": 5,
                 "maintAmt": 58035.0
             },
             {
-                "min": 2000000,  # stake = 500000.0
-                "max": 5000000,  # max_stake = 1250000.0
-                "mmr": 0.125,
-                "lev": 4,
+                "minNotional": 2000000,  # stake = 500000.0
+                "maxNotional": 5000000,  # max_stake = 1250000.0
+                "maintenanceMarginRate": 0.125,
+                "maxLeverage": 4,
                 "maintAmt": 108035.0
             },
             {
-                "min": 5000000,   # stake = 1666666.6666666667
-                "max": 10000000,  # max_stake = 3333333.3333333335
-                "mmr": 0.15,
-                "lev": 3,
+                "minNotional": 5000000,   # stake = 1666666.6666666667
+                "maxNotional": 10000000,  # max_stake = 3333333.3333333335
+                "maintenanceMarginRate": 0.15,
+                "maxLeverage": 3,
                 "maintAmt": 233035.0
             },
             {
-                "min": 10000000,  # stake = 5000000.0
-                "max": 20000000,  # max_stake = 10000000.0
-                "mmr": 0.25,
-                "lev": 2,
+                "minNotional": 10000000,  # stake = 5000000.0
+                "maxNotional": 20000000,  # max_stake = 10000000.0
+                "maintenanceMarginRate": 0.25,
+                "maxLeverage": 2,
                 "maintAmt": 1233035.0
             },
             {
-                "min": 20000000,  # stake = 20000000.0
-                "max": 50000000,  # max_stake = 50000000.0
-                "mmr": 0.5,
-                "lev": 1,
+                "minNotional": 20000000,  # stake = 20000000.0
+                "maxNotional": 50000000,  # max_stake = 50000000.0
+                "maintenanceMarginRate": 0.5,
+                "maxLeverage": 1,
                 "maintAmt": 6233035.0
             },
         ],
         'BTC/USDT': [
             {
-                "min": 0,      # stake = 0.0
-                "max": 50000,  # max_stake = 400.0
-                "mmr": 0.004,
-                "lev": 125,
+                "minNotional": 0,      # stake = 0.0
+                "maxNotional": 50000,  # max_stake = 400.0
+                "maintenanceMarginRate": 0.004,
+                "maxLeverage": 125,
                 "maintAmt": 0.0
             },
             {
-                "min": 50000,   # stake = 500.0
-                "max": 250000,  # max_stake = 2500.0
-                "mmr": 0.005,
-                "lev": 100,
+                "minNotional": 50000,   # stake = 500.0
+                "maxNotional": 250000,  # max_stake = 2500.0
+                "maintenanceMarginRate": 0.005,
+                "maxLeverage": 100,
                 "maintAmt": 50.0
             },
             {
-                "min": 250000,   # stake = 5000.0
-                "max": 1000000,  # max_stake = 20000.0
-                "mmr": 0.01,
-                "lev": 50,
+                "minNotional": 250000,   # stake = 5000.0
+                "maxNotional": 1000000,  # max_stake = 20000.0
+                "maintenanceMarginRate": 0.01,
+                "maxLeverage": 50,
                 "maintAmt": 1300.0
             },
             {
-                "min": 1000000,  # stake = 50000.0
-                "max": 7500000,  # max_stake = 375000.0
-                "mmr": 0.025,
-                "lev": 20,
+                "minNotional": 1000000,  # stake = 50000.0
+                "maxNotional": 7500000,  # max_stake = 375000.0
+                "maintenanceMarginRate": 0.025,
+                "maxLeverage": 20,
                 "maintAmt": 16300.0
             },
             {
-                "min": 7500000,   # stake = 750000.0
-                "max": 40000000,  # max_stake = 4000000.0
-                "mmr": 0.05,
-                "lev": 10,
+                "minNotional": 7500000,   # stake = 750000.0
+                "maxNotional": 40000000,  # max_stake = 4000000.0
+                "maintenanceMarginRate": 0.05,
+                "maxLeverage": 10,
                 "maintAmt": 203800.0
             },
             {
-                "min": 40000000,   # stake = 8000000.0
-                "max": 100000000,  # max_stake = 20000000.0
-                "mmr": 0.1,
-                "lev": 5,
+                "minNotional": 40000000,   # stake = 8000000.0
+                "maxNotional": 100000000,  # max_stake = 20000000.0
+                "maintenanceMarginRate": 0.1,
+                "maxLeverage": 5,
                 "maintAmt": 2203800.0
             },
             {
-                "min": 100000000,  # stake = 25000000.0
-                "max": 200000000,  # max_stake = 50000000.0
-                "mmr": 0.125,
-                "lev": 4,
+                "minNotional": 100000000,  # stake = 25000000.0
+                "maxNotional": 200000000,  # max_stake = 50000000.0
+                "maintenanceMarginRate": 0.125,
+                "maxLeverage": 4,
                 "maintAmt": 4703800.0
             },
             {
-                "min": 200000000,  # stake = 66666666.666666664
-                "max": 400000000,  # max_stake = 133333333.33333333
-                "mmr": 0.15,
-                "lev": 3,
+                "minNotional": 200000000,  # stake = 66666666.666666664
+                "maxNotional": 400000000,  # max_stake = 133333333.33333333
+                "maintenanceMarginRate": 0.15,
+                "maxLeverage": 3,
                 "maintAmt": 9703800.0
             },
             {
-                "min": 400000000,  # stake = 200000000.0
-                "max": 600000000,  # max_stake = 300000000.0
-                "mmr": 0.25,
-                "lev": 2,
+                "minNotional": 400000000,  # stake = 200000000.0
+                "maxNotional": 600000000,  # max_stake = 300000000.0
+                "maintenanceMarginRate": 0.25,
+                "maxLeverage": 2,
                 "maintAmt": 4.97038E7
             },
             {
-                "min": 600000000,   # stake = 600000000.0
-                "max": 1000000000,  # max_stake = 1000000000.0
-                "mmr": 0.5,
-                "lev": 1,
+                "minNotional": 600000000,   # stake = 600000000.0
+                "maxNotional": 1000000000,  # max_stake = 1000000000.0
+                "maintenanceMarginRate": 0.5,
+                "maxLeverage": 1,
                 "maintAmt": 1.997038E8
             },
         ],
         "ZEC/USDT": [
             {
-                'min': 0,
-                'max': 50000,
-                'mmr': 0.01,
-                'lev': 50,
+                'minNotional': 0,
+                'maxNotional': 50000,
+                'maintenanceMarginRate': 0.01,
+                'maxLeverage': 50,
                 'maintAmt': 0.0
             },
             {
-                'min': 50000,
-                'max': 150000,
-                'mmr': 0.025,
-                'lev': 20,
+                'minNotional': 50000,
+                'maxNotional': 150000,
+                'maintenanceMarginRate': 0.025,
+                'maxLeverage': 20,
                 'maintAmt': 750.0
             },
             {
-                'min': 150000,
-                'max': 250000,
-                'mmr': 0.05,
-                'lev': 10,
+                'minNotional': 150000,
+                'maxNotional': 250000,
+                'maintenanceMarginRate': 0.05,
+                'maxLeverage': 10,
                 'maintAmt': 4500.0
             },
             {
-                'min': 250000,
-                'max': 500000,
-                'mmr': 0.1,
-                'lev': 5,
+                'minNotional': 250000,
+                'maxNotional': 500000,
+                'maintenanceMarginRate': 0.1,
+                'maxLeverage': 5,
                 'maintAmt': 17000.0
             },
             {
-                'min': 500000,
-                'max': 1000000,
-                'mmr': 0.125,
-                'lev': 4,
+                'minNotional': 500000,
+                'maxNotional': 1000000,
+                'maintenanceMarginRate': 0.125,
+                'maxLeverage': 4,
                 'maintAmt': 29500.0
             },
             {
-                'min': 1000000,
-                'max': 2000000,
-                'mmr': 0.25,
-                'lev': 2,
+                'minNotional': 1000000,
+                'maxNotional': 2000000,
+                'maintenanceMarginRate': 0.25,
+                'maxLeverage': 2,
                 'maintAmt': 154500.0
             },
             {
-                'min': 2000000,
-                'max': 30000000,
-                'mmr': 0.5,
-                'lev': 1,
+                'minNotional': 2000000,
+                'maxNotional': 30000000,
+                'maintenanceMarginRate': 0.5,
+                'maxLeverage': 1,
                 'maintAmt': 654500.0
             },
         ]

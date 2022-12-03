@@ -1,4 +1,3 @@
-from math import isclose
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -8,14 +7,14 @@ from pandas import DataFrame, DateOffset, Timestamp, to_datetime
 
 from freqtrade.configuration import TimeRange
 from freqtrade.constants import LAST_BT_RESULT_FN
-from freqtrade.data.btanalysis import (BT_DATA_COLUMNS, analyze_trade_parallelism, calculate_csum,
-                                       calculate_market_change, calculate_max_drawdown,
-                                       calculate_underwater, combine_dataframes_with_mean,
-                                       create_cum_profit, extract_trades_of_period,
-                                       get_latest_backtest_filename, get_latest_hyperopt_file,
-                                       load_backtest_data, load_backtest_metadata, load_trades,
-                                       load_trades_from_db)
+from freqtrade.data.btanalysis import (BT_DATA_COLUMNS, analyze_trade_parallelism,
+                                       extract_trades_of_period, get_latest_backtest_filename,
+                                       get_latest_hyperopt_file, load_backtest_data,
+                                       load_backtest_metadata, load_trades, load_trades_from_db)
 from freqtrade.data.history import load_data, load_pair_history
+from freqtrade.data.metrics import (calculate_cagr, calculate_csum, calculate_market_change,
+                                    calculate_max_drawdown, calculate_underwater,
+                                    combine_dataframes_with_mean, create_cum_profit)
 from freqtrade.exceptions import OperationalException
 from tests.conftest import CURRENT_TEST_STRATEGY, create_mock_trades
 from tests.conftest_trades import MOCK_TRADE_COUNT
@@ -85,7 +84,7 @@ def test_load_backtest_data_new_format(testdatadir):
     filename = testdatadir / "backtest_results/backtest-result_new.json"
     bt_data = load_backtest_data(filename)
     assert isinstance(bt_data, DataFrame)
-    assert set(bt_data.columns) == set(BT_DATA_COLUMNS + ['close_timestamp', 'open_timestamp'])
+    assert set(bt_data.columns) == set(BT_DATA_COLUMNS)
     assert len(bt_data) == 179
 
     # Test loading from string (must yield same result)
@@ -110,7 +109,7 @@ def test_load_backtest_data_multi(testdatadir):
         bt_data = load_backtest_data(filename, strategy=strategy)
         assert isinstance(bt_data, DataFrame)
         assert set(bt_data.columns) == set(
-            BT_DATA_COLUMNS + ['close_timestamp', 'open_timestamp'])
+            BT_DATA_COLUMNS)
         assert len(bt_data) == 179
 
         # Test loading from string (must yield same result)
@@ -236,7 +235,7 @@ def test_calculate_market_change(testdatadir):
     data = load_data(datadir=testdatadir, pairs=pairs, timeframe='5m')
     result = calculate_market_change(data)
     assert isinstance(result, float)
-    assert pytest.approx(result) == 0.00955514
+    assert pytest.approx(result) == 0.01100002
 
 
 def test_combine_dataframes_with_mean(testdatadir):
@@ -269,14 +268,14 @@ def test_create_cum_profit(testdatadir):
                                     "cum_profits", timeframe="5m")
     assert "cum_profits" in cum_profits.columns
     assert cum_profits.iloc[0]['cum_profits'] == 0
-    assert isclose(cum_profits.iloc[-1]['cum_profits'], 8.723007518796964e-06)
+    assert pytest.approx(cum_profits.iloc[-1]['cum_profits']) == 8.723007518796964e-06
 
 
 def test_create_cum_profit1(testdatadir):
     filename = testdatadir / "backtest_results/backtest-result_new.json"
     bt_data = load_backtest_data(filename)
     # Move close-time to "off" the candle, to make sure the logic still works
-    bt_data.loc[:, 'close_date'] = bt_data.loc[:, 'close_date'] + DateOffset(seconds=20)
+    bt_data['close_date'] = bt_data.loc[:, 'close_date'] + DateOffset(seconds=20)
     timerange = TimeRange.parse_timerange("20180110-20180112")
 
     df = load_pair_history(pair="TRX/BTC", timeframe='5m',
@@ -287,7 +286,7 @@ def test_create_cum_profit1(testdatadir):
                                     "cum_profits", timeframe="5m")
     assert "cum_profits" in cum_profits.columns
     assert cum_profits.iloc[0]['cum_profits'] == 0
-    assert isclose(cum_profits.iloc[-1]['cum_profits'], 8.723007518796964e-06)
+    assert pytest.approx(cum_profits.iloc[-1]['cum_profits']) == 8.723007518796964e-06
 
     with pytest.raises(ValueError, match='Trade dataframe empty.'):
         create_cum_profit(df.set_index('date'), bt_data[bt_data["pair"] == 'NOTAPAIR'],
@@ -336,6 +335,19 @@ def test_calculate_csum(testdatadir):
         csum_min, csum_max = calculate_csum(DataFrame())
 
 
+@pytest.mark.parametrize('start,end,days, expected', [
+    (64900, 176000, 3 * 365, 0.3945),
+    (64900, 176000, 365, 1.7119),
+    (1000, 1000, 365, 0.0),
+    (1000, 1500, 365, 0.5),
+    (1000, 1500, 100, 3.3927),  # sub year
+    (0.01000000, 0.01762792, 120, 4.6087),  # sub year BTC values
+])
+def test_calculate_cagr(start, end, days, expected):
+
+    assert round(calculate_cagr(days, start, end), 4) == expected
+
+
 def test_calculate_max_drawdown2():
     values = [0.011580, 0.010048, 0.011340, 0.012161, 0.010416, 0.010009, 0.020024,
               -0.024662, -0.022350, 0.020496, -0.029859, -0.030511, 0.010041, 0.010872,
@@ -363,3 +375,38 @@ def test_calculate_max_drawdown2():
     df = DataFrame(zip(values[:5], dates[:5]), columns=['profit', 'open_date'])
     with pytest.raises(ValueError, match='No losing trade, therefore no drawdown.'):
         calculate_max_drawdown(df, date_col='open_date', value_col='profit')
+
+
+@pytest.mark.parametrize('profits,relative,highd,lowd,result,result_rel', [
+    ([0.0, -500.0, 500.0, 10000.0, -1000.0], False, 3, 4, 1000.0, 0.090909),
+    ([0.0, -500.0, 500.0, 10000.0, -1000.0], True, 0, 1, 500.0, 0.5),
+
+])
+def test_calculate_max_drawdown_abs(profits, relative, highd, lowd, result, result_rel):
+    """
+    Test case from issue https://github.com/freqtrade/freqtrade/issues/6655
+    [1000, 500,  1000, 11000, 10000] # absolute results
+    [1000, 50%,  0%,   0%,       ~9%]   # Relative drawdowns
+    """
+    init_date = Arrow(2020, 1, 1)
+    dates = [init_date.shift(days=i) for i in range(len(profits))]
+    df = DataFrame(zip(profits, dates), columns=['profit_abs', 'open_date'])
+    # sort by profit and reset index
+    df = df.sort_values('profit_abs').reset_index(drop=True)
+    df1 = df.copy()
+    drawdown, hdate, ldate, hval, lval, drawdown_rel = calculate_max_drawdown(
+        df, date_col='open_date', starting_balance=1000, relative=relative)
+    # Ensure df has not been altered.
+    assert df.equals(df1)
+
+    assert isinstance(drawdown, float)
+    assert isinstance(drawdown_rel, float)
+    assert hdate == init_date.shift(days=highd)
+    assert ldate == init_date.shift(days=lowd)
+
+    # High must be before low
+    assert hdate < ldate
+    # High value must be higher than low value
+    assert hval > lval
+    assert drawdown == result
+    assert pytest.approx(drawdown_rel) == result_rel

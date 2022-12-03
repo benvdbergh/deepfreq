@@ -1,9 +1,11 @@
 
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
+from freqtrade.constants import Config, LongShort
 from freqtrade.exchange import timeframe_to_minutes
 from freqtrade.misc import plural
 from freqtrade.mixins import LoggingMixin
@@ -12,7 +14,13 @@ from freqtrade.persistence import LocalTrade
 
 logger = logging.getLogger(__name__)
 
-ProtectionReturn = Tuple[bool, Optional[datetime], Optional[str]]
+
+@dataclass
+class ProtectionReturn:
+    lock: bool
+    until: datetime
+    reason: Optional[str]
+    lock_side: str = '*'
 
 
 class IProtection(LoggingMixin, ABC):
@@ -22,7 +30,7 @@ class IProtection(LoggingMixin, ABC):
     # Can stop trading for one pair
     has_local_stop: bool = False
 
-    def __init__(self, config: Dict[str, Any], protection_config: Dict[str, Any]) -> None:
+    def __init__(self, config: Config, protection_config: Dict[str, Any]) -> None:
         self._config = config
         self._protection_config = protection_config
         self._stop_duration_candles: Optional[int] = None
@@ -80,14 +88,15 @@ class IProtection(LoggingMixin, ABC):
         """
 
     @abstractmethod
-    def global_stop(self, date_now: datetime) -> ProtectionReturn:
+    def global_stop(self, date_now: datetime, side: LongShort) -> Optional[ProtectionReturn]:
         """
         Stops trading (position entering) for all pairs
         This must evaluate to true for the whole period of the "cooldown period".
         """
 
     @abstractmethod
-    def stop_per_pair(self, pair: str, date_now: datetime) -> ProtectionReturn:
+    def stop_per_pair(
+            self, pair: str, date_now: datetime, side: LongShort) -> Optional[ProtectionReturn]:
         """
         Stops trading (position entering) for this pair
         This must evaluate to true for the whole period of the "cooldown period".

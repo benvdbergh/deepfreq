@@ -119,6 +119,7 @@ This subcommand is useful for finding problems in your environment with loading 
 usage: freqtrade list-strategies [-h] [-v] [--logfile FILE] [-V] [-c PATH]
                                  [-d PATH] [--userdir PATH]
                                  [--strategy-path PATH] [-1] [--no-color]
+                                 [--recursive-strategy-search]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -126,6 +127,9 @@ optional arguments:
   -1, --one-column      Print output in one column.
   --no-color            Disable colorization of hyperopt results. May be
                         useful if you are redirecting output to a file.
+  --recursive-strategy-search
+                        Recursively search for a strategy in the strategies
+                        folder.
 
 Common arguments:
   -v, --verbose         Verbose mode (-vv for more, -vvv to get all messages).
@@ -134,9 +138,10 @@ Common arguments:
                         details.
   -V, --version         show program's version number and exit
   -c PATH, --config PATH
-                        Specify configuration file (default: `config.json`).
-                        Multiple --config options may be used. Can be set to
-                        `-` to read config from stdin.
+                        Specify configuration file (default:
+                        `userdir/config.json` or `config.json` whichever
+                        exists). Multiple --config options may be used. Can be
+                        set to `-` to read config from stdin.
   -d PATH, --datadir PATH
                         Path to directory with historical backtesting data.
   --userdir PATH, --user-data-dir PATH
@@ -162,6 +167,43 @@ Example: Search dedicated strategy path.
 
 ``` bash
 freqtrade list-strategies --strategy-path ~/.freqtrade/strategies/
+```
+
+## List freqAI models
+
+Use the `list-freqaimodels` subcommand to see all freqAI models available.
+
+This subcommand is useful for finding problems in your environment with loading freqAI models: modules with models that contain errors and failed to load are printed in red (LOAD FAILED), while models with duplicate names are printed in yellow (DUPLICATE NAME).
+
+```
+usage: freqtrade list-freqaimodels [-h] [-v] [--logfile FILE] [-V] [-c PATH]
+                                   [-d PATH] [--userdir PATH]
+                                   [--freqaimodel-path PATH] [-1] [--no-color]
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --freqaimodel-path PATH
+                        Specify additional lookup path for freqaimodels.
+  -1, --one-column      Print output in one column.
+  --no-color            Disable colorization of hyperopt results. May be
+                        useful if you are redirecting output to a file.
+
+Common arguments:
+  -v, --verbose         Verbose mode (-vv for more, -vvv to get all messages).
+  --logfile FILE        Log to the file specified. Special values are:
+                        'syslog', 'journald'. See the documentation for more
+                        details.
+  -V, --version         show program's version number and exit
+  -c PATH, --config PATH
+                        Specify configuration file (default:
+                        `userdir/config.json` or `config.json` whichever
+                        exists). Multiple --config options may be used. Can be
+                        set to `-` to read config from stdin.
+  -d PATH, --datadir PATH, --data-dir PATH
+                        Path to directory with historical backtesting data.
+  --userdir PATH, --user-data-dir PATH
+                        Path to userdata directory.
+
 ```
 
 ## List Exchanges
@@ -221,7 +263,6 @@ equos            True     missing opt: fetchTicker, fetchTickers
 eterbase         True
 fcoin            True     missing opt: fetchMyTrades, fetchTickers
 fcoinjp          True     missing opt: fetchMyTrades, fetchTickers
-ftx              True
 gateio           True
 gemini           True
 gopax            True
@@ -327,7 +368,6 @@ fcoin               True     missing opt: fetchMyTrades, fetchTickers
 fcoinjp             True     missing opt: fetchMyTrades, fetchTickers
 flowbtc             False    missing: fetchOrder, fetchOHLCV
 foxbit              False    missing: fetchOrder, fetchOHLCV
-ftx                 True
 gateio              True
 gemini              True
 gopax               True
@@ -520,12 +560,14 @@ Requires a configuration with specified `pairlists` attribute.
 Can be used to generate static pairlists to be used during backtesting / hyperopt.
 
 ```
-usage: freqtrade test-pairlist [-h] [-v] [-c PATH]
+usage: freqtrade test-pairlist [-h] [--userdir PATH] [-v] [-c PATH]
                                [--quote QUOTE_CURRENCY [QUOTE_CURRENCY ...]]
                                [-1] [--print-json] [--exchange EXCHANGE]
 
 optional arguments:
   -h, --help            show this help message and exit
+  --userdir PATH, --user-data-dir PATH
+                        Path to userdata directory.
   -v, --verbose         Verbose mode (-vv for more, -vvv to get all messages).
   -c PATH, --config PATH
                         Specify configuration file (default:
@@ -548,6 +590,27 @@ Show whitelist when using a [dynamic pairlist](plugins.md#pairlists).
 ```
 freqtrade test-pairlist --config config.json --quote USDT BTC
 ```
+
+## Convert database
+
+`freqtrade convert-db` can be used to convert your database from one system to another (sqlite -> postgres, postgres -> other postgres), migrating all trades, orders and Pairlocks.
+
+Please refer to the [SQL cheatsheet](sql_cheatsheet.md#use-a-different-database-system) to learn about requirements for different database systems.
+
+```
+usage: freqtrade convert-db [-h] [--db-url PATH] [--db-url-from PATH]
+
+optional arguments:
+  -h, --help          show this help message and exit
+  --db-url PATH       Override trades database URL, this is useful in custom
+                      deployments (default: `sqlite:///tradesv3.sqlite` for
+                      Live Run mode, `sqlite:///tradesv3.dryrun.sqlite` for
+                      Dry Run).
+  --db-url-from PATH  Source db url to use when migrating a database.
+```
+
+!!! Warning
+    Please ensure to only use this on an empty target database. Freqtrade will perform a regular migration, but may fail if entries already existed.
 
 ## Webserver mode
 
@@ -585,6 +648,26 @@ Common arguments:
 
 ```
 
+### Webserver mode - docker
+
+You can also use webserver mode via docker.
+Starting a one-off container requires the configuration of the port explicitly, as ports are not exposed by default.
+You can use `docker-compose run --rm -p 127.0.0.1:8080:8080 freqtrade webserver` to start a one-off container that'll be removed once you stop it. This assumes that port 8080 is still available and no other bot is running on that port.
+
+Alternatively, you can reconfigure the docker-compose file to have the command updated:
+
+``` yml
+    command: >
+      webserver
+      --config /freqtrade/user_data/config.json
+```
+
+You can now use `docker-compose up` to start the webserver.
+This assumes that the configuration has a webserver enabled and configured for docker (listening port = `0.0.0.0`).
+
+!!! Tip
+    Don't forget to reset the command back to the trade command if you want to start a live or dry-run bot. 
+
 ## Show previous Backtest results
 
 Allows you to show previous backtest results.
@@ -606,6 +689,66 @@ optional arguments:
                         `--export-filename=user_data/backtest_results/backtest
                         _today.json`
   --show-pair-list      Show backtesting pairlist sorted by profit.
+
+Common arguments:
+  -v, --verbose         Verbose mode (-vv for more, -vvv to get all messages).
+  --logfile FILE        Log to the file specified. Special values are:
+                        'syslog', 'journald'. See the documentation for more
+                        details.
+  -V, --version         show program's version number and exit
+  -c PATH, --config PATH
+                        Specify configuration file (default:
+                        `userdir/config.json` or `config.json` whichever
+                        exists). Multiple --config options may be used. Can be
+                        set to `-` to read config from stdin.
+  -d PATH, --datadir PATH
+                        Path to directory with historical backtesting data.
+  --userdir PATH, --user-data-dir PATH
+                        Path to userdata directory.
+
+```
+
+## Detailed backtest analysis
+
+Advanced backtest result analysis.
+
+More details in the [Backtesting analysis](advanced-backtesting.md#analyze-the-buyentry-and-sellexit-tags) Section.
+
+```
+usage: freqtrade backtesting-analysis [-h] [-v] [--logfile FILE] [-V]
+                                      [-c PATH] [-d PATH] [--userdir PATH]
+                                      [--export-filename PATH]
+                                      [--analysis-groups {0,1,2,3,4} [{0,1,2,3,4} ...]]
+                                      [--enter-reason-list ENTER_REASON_LIST [ENTER_REASON_LIST ...]]
+                                      [--exit-reason-list EXIT_REASON_LIST [EXIT_REASON_LIST ...]]
+                                      [--indicator-list INDICATOR_LIST [INDICATOR_LIST ...]]
+                                      [--timerange YYYYMMDD-[YYYYMMDD]]
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --export-filename PATH, --backtest-filename PATH
+                        Use this filename for backtest results.Requires
+                        `--export` to be set as well. Example: `--export-filen
+                        ame=user_data/backtest_results/backtest_today.json`
+  --analysis-groups {0,1,2,3,4} [{0,1,2,3,4} ...]
+                        grouping output - 0: simple wins/losses by enter tag,
+                        1: by enter_tag, 2: by enter_tag and exit_tag, 3: by
+                        pair and enter_tag, 4: by pair, enter_ and exit_tag
+                        (this can get quite large)
+  --enter-reason-list ENTER_REASON_LIST [ENTER_REASON_LIST ...]
+                        Comma separated list of entry signals to analyse.
+                        Default: all. e.g. 'entry_tag_a,entry_tag_b'
+  --exit-reason-list EXIT_REASON_LIST [EXIT_REASON_LIST ...]
+                        Comma separated list of exit signals to analyse.
+                        Default: all. e.g.
+                        'exit_tag_a,roi,stop_loss,trailing_stop_loss'
+  --indicator-list INDICATOR_LIST [INDICATOR_LIST ...]
+                        Comma separated list of indicators to analyse. e.g.
+                        'close,rsi,bb_lowerband,profit_abs'
+  --timerange YYYYMMDD-[YYYYMMDD]
+                        Timerange to filter trades for analysis, 
+                        start inclusive, end exclusive. e.g.
+                        20220101-20220201
 
 Common arguments:
   -v, --verbose         Verbose mode (-vv for more, -vvv to get all messages).

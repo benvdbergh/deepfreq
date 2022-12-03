@@ -104,6 +104,10 @@ class Profit(BaseModel):
     best_pair_profit_ratio: float
     winning_trades: int
     losing_trades: int
+    profit_factor: float
+    max_drawdown: float
+    max_drawdown_abs: float
+    trading_volume: Optional[float]
 
 
 class SellReason(BaseModel):
@@ -120,6 +124,8 @@ class Stats(BaseModel):
 class DailyRecord(BaseModel):
     date: date
     abs_profit: float
+    rel_profit: float
+    starting_balance: float
     fiat_value: float
     trade_count: int
 
@@ -166,7 +172,7 @@ class ShowConfig(BaseModel):
     trailing_stop_positive: Optional[float]
     trailing_stop_positive_offset: Optional[float]
     trailing_only_offset_is_reached: Optional[bool]
-    unfilledtimeout: UnfilledTimeout
+    unfilledtimeout: Optional[UnfilledTimeout]  # Empty in webserver mode
     order_types: Optional[OrderTypes]
     use_custom_stoploss: Optional[bool]
     timeframe: Optional[str]
@@ -188,11 +194,11 @@ class OrderSchema(BaseModel):
     pair: str
     order_id: str
     status: str
-    remaining: float
+    remaining: Optional[float]
     amount: float
     safe_price: float
     cost: float
-    filled: float
+    filled: Optional[float]
     ft_order_side: str
     order_type: str
     is_open: bool
@@ -256,6 +262,7 @@ class TradeSchema(BaseModel):
 
     leverage: Optional[float]
     interest_rate: Optional[float]
+    liquidation_price: Optional[float]
     funding_fees: Optional[float]
     trading_mode: Optional[TradingMode]
 
@@ -276,6 +283,7 @@ class OpenTradeSchema(TradeSchema):
 class TradeResponse(BaseModel):
     trades: List[TradeSchema]
     trades_count: int
+    offset: int
     total_trades: int
 
 
@@ -291,6 +299,7 @@ class LockModel(BaseModel):
     lock_time: str
     lock_timestamp: int
     pair: str
+    side: str
     reason: str
 
 
@@ -316,11 +325,13 @@ class ForceEnterPayload(BaseModel):
     ordertype: Optional[OrderTypeValues]
     stakeamount: Optional[float]
     entry_tag: Optional[str]
+    leverage: Optional[float]
 
 
 class ForceExitPayload(BaseModel):
     tradeid: str
     ordertype: Optional[OrderTypeValues]
+    amount: Optional[float]
 
 
 class BlacklistPayload(BaseModel):

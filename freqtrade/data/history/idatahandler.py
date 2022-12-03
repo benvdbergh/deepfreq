@@ -5,11 +5,11 @@ It's subclasses handle and storing data from disk.
 """
 import logging
 import re
-from abc import ABC, abstractclassmethod, abstractmethod
+from abc import ABC, abstractmethod
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Type
+from typing import List, Optional, Tuple, Type
 
 from pandas import DataFrame
 
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 class IDataHandler(ABC):
 
-    _OHLCV_REGEX = r'^([a-zA-Z_-]+)\-(\d+\S)\-?([a-zA-Z_]*)?(?=\.)'
+    _OHLCV_REGEX = r'^([a-zA-Z_\d-]+)\-(\d+[a-zA-Z]{1,2})\-?([a-zA-Z_]*)?(?=\.)'
 
     def __init__(self, datadir: Path) -> None:
         self._datadir = datadir
@@ -38,17 +38,29 @@ class IDataHandler(ABC):
         """
         raise NotImplementedError()
 
-    @abstractclassmethod
+    @classmethod
     def ohlcv_get_available_data(
             cls, datadir: Path, trading_mode: TradingMode) -> ListPairsWithTimeframes:
         """
         Returns a list of all pairs with ohlcv data available in this datadir
         :param datadir: Directory to search for ohlcv files
         :param trading_mode: trading-mode to be used
-        :return: List of Tuples of (pair, timeframe)
+        :return: List of Tuples of (pair, timeframe, CandleType)
         """
+        if trading_mode == TradingMode.FUTURES:
+            datadir = datadir.joinpath('futures')
+        _tmp = [
+            re.search(
+                cls._OHLCV_REGEX, p.name
+            ) for p in datadir.glob(f"*.{cls._get_file_extension()}")]
+        return [
+            (
+                cls.rebuild_pair_from_filename(match[1]),
+                cls.rebuild_timeframe_from_filename(match[2]),
+                CandleType.from_string(match[3])
+            ) for match in _tmp if match and len(match.groups()) > 1]
 
-    @abstractclassmethod
+    @classmethod
     def ohlcv_get_pairs(cls, datadir: Path, timeframe: str, candle_type: CandleType) -> List[str]:
         """
         Returns a list of all pairs with ohlcv data available in this datadir
@@ -58,6 +70,15 @@ class IDataHandler(ABC):
         :param candle_type: Any of the enum CandleType (must match trading mode!)
         :return: List of Pairs
         """
+        candle = ""
+        if candle_type != CandleType.SPOT:
+            datadir = datadir.joinpath('futures')
+            candle = f"-{candle_type}"
+        ext = cls._get_file_extension()
+        _tmp = [re.search(r'^(\S+)(?=\-' + timeframe + candle + f'.{ext})', p.name)
+                for p in datadir.glob(f"*{timeframe}{candle}.{ext}")]
+        # Check if regex found something and only return these results
+        return [cls.rebuild_pair_from_filename(match[0]) for match in _tmp if match]
 
     @abstractmethod
     def ohlcv_store(
@@ -70,6 +91,23 @@ class IDataHandler(ABC):
         :param candle_type: Any of the enum CandleType (must match trading mode!)
         :return: None
         """
+
+    def ohlcv_data_min_max(self, pair: str, timeframe: str,
+                           candle_type: CandleType) -> Tuple[datetime, datetime]:
+        """
+        Returns the min and max timestamp for the given pair and timeframe.
+        :param pair: Pair to get min/max for
+        :param timeframe: Timeframe to get min/max for
+        :param candle_type: Any of the enum CandleType (must match trading mode!)
+        :return: (min, max)
+        """
+        data = self._ohlcv_load(pair, timeframe, None, candle_type)
+        if data.empty:
+            return (
+                datetime.fromtimestamp(0, tz=timezone.utc),
+                datetime.fromtimestamp(0, tz=timezone.utc)
+            )
+        return data.iloc[0]['date'].to_pydatetime(), data.iloc[-1]['date'].to_pydatetime()
 
     @abstractmethod
     def _ohlcv_load(self, pair: str, timeframe: str, timerange: Optional[TimeRange],
@@ -118,13 +156,18 @@ class IDataHandler(ABC):
         :param candle_type: Any of the enum CandleType (must match trading mode!)
         """
 
-    @abstractclassmethod
+    @classmethod
     def trades_get_pairs(cls, datadir: Path) -> List[str]:
         """
         Returns a list of all pairs for which trade data is available in this
         :param datadir: Directory to search for ohlcv files
         :return: List of Pairs
         """
+        _ext = cls._get_file_extension()
+        _tmp = [re.search(r'^(\S+)(?=\-trades.' + _ext + ')', p.name)
+                for p in datadir.glob(f"*trades.{_ext}")]
+        # Check if regex found something and only return these results to avoid exceptions.
+        return [cls.rebuild_pair_from_filename(match[0]) for match in _tmp if match]
 
     @abstractmethod
     def trades_store(self, pair: str, data: TradeList) -> None:
@@ -190,10 +233,14 @@ class IDataHandler(ABC):
         datadir: Path,
         pair: str,
         timeframe: str,
-        candle_type: CandleType
+        candle_type: CandleType,
+        no_timeframe_modify: bool = False
     ) -> Path:
         pair_s = misc.pair_to_filename(pair)
         candle = ""
+        if not no_timeframe_modify:
+            timeframe = cls.timeframe_to_file(timeframe)
+
         if candle_type != CandleType.SPOT:
             datadir = datadir.joinpath('futures')
             candle = f"-{candle_type}"
@@ -208,20 +255,32 @@ class IDataHandler(ABC):
         return filename
 
     @staticmethod
+    def timeframe_to_file(timeframe: str):
+        return timeframe.replace('M', 'Mo')
+
+    @staticmethod
+    def rebuild_timeframe_from_filename(timeframe: str) -> str:
+        """
+        converts timeframe from disk to file
+        Replaces mo with M (to avoid problems on case-insensitive filesystems)
+        """
+        return re.sub('1mo', '1M', timeframe, flags=re.IGNORECASE)
+
+    @staticmethod
     def rebuild_pair_from_filename(pair: str) -> str:
         """
         Rebuild pair name from filename
         Assumes a asset name of max. 7 length to also support BTC-PERP and BTC-PERP:USD names.
         """
-        res = re.sub(r'^(([A-Za-z]{1,10})|^([A-Za-z\-]{1,6}))(_)', r'\g<1>/', pair, 1)
+        res = re.sub(r'^(([A-Za-z\d]{1,10})|^([A-Za-z\-]{1,6}))(_)', r'\g<1>/', pair, 1)
         res = re.sub('_', ':', res, 1)
         return res
 
     def ohlcv_load(self, pair, timeframe: str,
-                   candle_type: CandleType,
+                   candle_type: CandleType, *,
                    timerange: Optional[TimeRange] = None,
                    fill_missing: bool = True,
-                   drop_incomplete: bool = True,
+                   drop_incomplete: bool = False,
                    startup_candles: int = 0,
                    warn_no_data: bool = True,
                    ) -> DataFrame:
@@ -249,7 +308,7 @@ class IDataHandler(ABC):
             timerange=timerange_startup,
             candle_type=candle_type
         )
-        if self._check_empty_df(pairdf, pair, timeframe, candle_type, warn_no_data):
+        if self._check_empty_df(pairdf, pair, timeframe, candle_type, warn_no_data, True):
             return pairdf
         else:
             enddate = pairdf.iloc[-1]['date']
@@ -269,8 +328,9 @@ class IDataHandler(ABC):
             self._check_empty_df(pairdf, pair, timeframe, candle_type, warn_no_data)
             return pairdf
 
-    def _check_empty_df(self, pairdf: DataFrame, pair: str, timeframe: str,
-                        candle_type: CandleType, warn_no_data: bool):
+    def _check_empty_df(
+            self, pairdf: DataFrame, pair: str, timeframe: str, candle_type: CandleType,
+            warn_no_data: bool, warn_price: bool = False) -> bool:
         """
         Warn on empty dataframe
         """
@@ -281,6 +341,20 @@ class IDataHandler(ABC):
                     "Use `freqtrade download-data` to download the data"
                 )
             return True
+        elif warn_price:
+            candle_price_gap = 0
+            if (candle_type in (CandleType.SPOT, CandleType.FUTURES) and
+                    not pairdf.empty
+                    and 'close' in pairdf.columns and 'open' in pairdf.columns):
+                # Detect gaps between prior close and open
+                gaps = ((pairdf['open'] - pairdf['close'].shift(1)) / pairdf['close'].shift(1))
+                gaps = gaps.dropna()
+                if len(gaps):
+                    candle_price_gap = max(abs(gaps))
+            if candle_price_gap > 0.1:
+                logger.info(f"Price jump in {pair}, {timeframe}, {candle_type} between two candles "
+                            f"of {candle_price_gap:.2%} detected.")
+
         return False
 
     def _validate_pairdata(self, pair, pairdata: DataFrame, timeframe: str,
@@ -292,13 +366,11 @@ class IDataHandler(ABC):
         """
 
         if timerange.starttype == 'date':
-            start = datetime.fromtimestamp(timerange.startts, tz=timezone.utc)
-            if pairdata.iloc[0]['date'] > start:
+            if pairdata.iloc[0]['date'] > timerange.startdt:
                 logger.warning(f"{pair}, {candle_type}, {timeframe}, "
                                f"data starts at {pairdata.iloc[0]['date']:%Y-%m-%d %H:%M:%S}")
         if timerange.stoptype == 'date':
-            stop = datetime.fromtimestamp(timerange.stopts, tz=timezone.utc)
-            if pairdata.iloc[-1]['date'] < stop:
+            if pairdata.iloc[-1]['date'] < timerange.stopdt:
                 logger.warning(f"{pair}, {candle_type}, {timeframe}, "
                                f"data ends at {pairdata.iloc[-1]['date']:%Y-%m-%d %H:%M:%S}")
 
@@ -321,6 +393,12 @@ def get_datahandlerclass(datatype: str) -> Type[IDataHandler]:
     elif datatype == 'hdf5':
         from .hdf5datahandler import HDF5DataHandler
         return HDF5DataHandler
+    elif datatype == 'feather':
+        from .featherdatahandler import FeatherDataHandler
+        return FeatherDataHandler
+    elif datatype == 'parquet':
+        from .parquetdatahandler import ParquetDataHandler
+        return ParquetDataHandler
     else:
         raise ValueError(f"No datahandler for datatype {datatype} available.")
 

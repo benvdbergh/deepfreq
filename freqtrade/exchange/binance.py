@@ -1,5 +1,4 @@
 """ Binance exchange subclass """
-import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +11,8 @@ from freqtrade.enums import CandleType, MarginMode, TradingMode
 from freqtrade.exceptions import DDosProtection, OperationalException, TemporaryError
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.common import retrier
-from freqtrade.misc import deep_merge_dicts
+from freqtrade.exchange.types import Tickers
+from freqtrade.misc import deep_merge_dicts, json_load
 
 
 logger = logging.getLogger(__name__)
@@ -23,8 +23,7 @@ class Binance(Exchange):
     _ft_has: Dict = {
         "stoploss_on_exchange": True,
         "stoploss_order_types": {"limit": "stop_loss_limit"},
-        "order_time_in_force": ['gtc', 'fok', 'ioc'],
-        "time_in_force_parameter": "timeInForce",
+        "order_time_in_force": ['GTC', 'FOK', 'IOC'],
         "ohlcv_candle_limit": 1000,
         "trades_pagination": "id",
         "trades_pagination_arg": "fromId",
@@ -32,7 +31,7 @@ class Binance(Exchange):
         "ccxt_futures_name": "future"
     }
     _ft_has_futures: Dict = {
-        "stoploss_order_types": {"limit": "stop"},
+        "stoploss_order_types": {"limit": "limit", "market": "market"},
         "tickers_have_price": False,
     }
 
@@ -43,21 +42,7 @@ class Binance(Exchange):
         (TradingMode.FUTURES, MarginMode.ISOLATED)
     ]
 
-    def stoploss_adjust(self, stop_loss: float, order: Dict, side: str) -> bool:
-        """
-        Verify stop_loss against stoploss-order value (limit or price)
-        Returns True if adjustment is necessary.
-        :param side: "buy" or "sell"
-        """
-
-        ordertype = 'stop' if self.trading_mode == TradingMode.FUTURES else 'stop_loss_limit'
-
-        return order['type'] == ordertype and (
-            (side == "sell" and stop_loss > float(order['info']['stopPrice'])) or
-            (side == "buy" and stop_loss < float(order['info']['stopPrice']))
-        )
-
-    def get_tickers(self, symbols: List[str] = None, cached: bool = False) -> Dict:
+    def get_tickers(self, symbols: Optional[List[str]] = None, cached: bool = False) -> Tickers:
         tickers = super().get_tickers(symbols=symbols, cached=cached)
         if self.trading_mode == TradingMode.FUTURES:
             # Binance's future result has no bid/ask values.
@@ -65,6 +50,37 @@ class Binance(Exchange):
             bidsasks = self.fetch_bids_asks(symbols, cached)
             tickers = deep_merge_dicts(bidsasks, tickers, allow_null_overrides=False)
         return tickers
+
+    @retrier
+    def additional_exchange_init(self) -> None:
+        """
+        Additional exchange initialization logic.
+        .api will be available at this point.
+        Must be overridden in child methods if required.
+        """
+        try:
+            if self.trading_mode == TradingMode.FUTURES and not self._config['dry_run']:
+                position_side = self._api.fapiPrivateGetPositionsideDual()
+                self._log_exchange_response('position_side_setting', position_side)
+                assets_margin = self._api.fapiPrivateGetMultiAssetsMargin()
+                self._log_exchange_response('multi_asset_margin', assets_margin)
+                msg = ""
+                if position_side.get('dualSidePosition') is True:
+                    msg += (
+                        "\nHedge Mode is not supported by freqtrade. "
+                        "Please change 'Position Mode' on your binance futures account.")
+                if assets_margin.get('multiAssetsMargin') is True:
+                    msg += ("\nMulti-Asset Mode is not supported by freqtrade. "
+                            "Please change 'Asset Mode' on your binance futures account.")
+                if msg:
+                    raise OperationalException(msg)
+        except ccxt.DDoSProtection as e:
+            raise DDosProtection(e) from e
+        except (ccxt.NetworkError, ccxt.ExchangeError) as e:
+            raise TemporaryError(
+                f'Could not set leverage due to {e.__class__.__name__}. Message: {e}') from e
+        except ccxt.BaseError as e:
+            raise OperationalException(e) from e
 
     @retrier
     def _set_leverage(
@@ -95,6 +111,7 @@ class Binance(Exchange):
     async def _async_get_historic_ohlcv(self, pair: str, timeframe: str,
                                         since_ms: int, candle_type: CandleType,
                                         is_new_pair: bool = False, raise_: bool = False,
+                                        until_ms: Optional[int] = None
                                         ) -> Tuple[str, str, str, List]:
         """
         Overwrite to introduce "fast new pair" functionality by detecting the pair's listing date
@@ -115,7 +132,8 @@ class Binance(Exchange):
             since_ms=since_ms,
             is_new_pair=is_new_pair,
             raise_=raise_,
-            candle_type=candle_type
+            candle_type=candle_type,
+            until_ms=until_ms,
         )
 
     def funding_fee_cutoff(self, open_date: datetime):
@@ -130,23 +148,27 @@ class Binance(Exchange):
         pair: str,
         open_rate: float,   # Entry price of position
         is_short: bool,
-        position: float,  # Absolute value of position size
+        amount: float,
+        stake_amount: float,
         wallet_balance: float,  # Or margin balance
         mm_ex_1: float = 0.0,  # (Binance) Cross only
         upnl_ex_1: float = 0.0,  # (Binance) Cross only
     ) -> Optional[float]:
         """
+        Important: Must be fetching data from cached values as this is used by backtesting!
         MARGIN: https://www.binance.com/en/support/faq/f6b010588e55413aa58b7d63ee0125ed
         PERPETUAL: https://www.binance.com/en/support/faq/b3c689c1f50a44cabb3a84e663b81d93
 
         :param exchange_name:
-        :param open_rate: (EP1) Entry price of position
+        :param open_rate: Entry price of position
         :param is_short: True if the trade is a short, false otherwise
-        :param position: Absolute value of position size (in base currency)
-        :param wallet_balance: (WB)
+        :param amount: Absolute value of position size incl. leverage (in base currency)
+        :param stake_amount: Stake amount - Collateral in settle currency.
+        :param trading_mode: SPOT, MARGIN, FUTURES, etc.
+        :param margin_mode: Either ISOLATED or CROSS
+        :param wallet_balance: Amount of margin_mode in the wallet being used to trade
             Cross-Margin Mode: crossWalletBalance
             Isolated-Margin Mode: isolatedWalletBalance
-        :param maintenance_amt:
 
         # * Only required for Cross
         :param mm_ex_1: (TMM)
@@ -158,12 +180,11 @@ class Binance(Exchange):
         """
 
         side_1 = -1 if is_short else 1
-        position = abs(position)
         cross_vars = upnl_ex_1 - mm_ex_1 if self.margin_mode == MarginMode.CROSS else 0.0
 
         # mm_ratio: Binance's formula specifies maintenance margin rate which is mm_ratio * 100%
         # maintenance_amt: (CUM) Maintenance Amount of position
-        mm_ratio, maintenance_amt = self.get_maintenance_ratio_and_amt(pair, position)
+        mm_ratio, maintenance_amt = self.get_maintenance_ratio_and_amt(pair, stake_amount)
 
         if (maintenance_amt is None):
             raise OperationalException(
@@ -175,9 +196,9 @@ class Binance(Exchange):
             return (
                 (
                     (wallet_balance + cross_vars + maintenance_amt) -
-                    (side_1 * position * open_rate)
+                    (side_1 * amount * open_rate)
                 ) / (
-                    (position * mm_ratio) - (side_1 * position)
+                    (amount * mm_ratio) - (side_1 * amount)
                 )
             )
         else:
@@ -192,7 +213,7 @@ class Binance(Exchange):
                     Path(__file__).parent / 'binance_leverage_tiers.json'
                 )
                 with open(leverage_tiers_path) as json_file:
-                    return json.load(json_file)
+                    return json_load(json_file)
             else:
                 try:
                     return self._api.fetch_leverage_tiers()

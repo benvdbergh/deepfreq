@@ -11,7 +11,7 @@ import pytest
 from jsonschema import ValidationError
 
 from freqtrade.commands import Arguments
-from freqtrade.configuration import Configuration, check_exchange, validate_config_consistency
+from freqtrade.configuration import Configuration, validate_config_consistency
 from freqtrade.configuration.config_validation import validate_config_schema
 from freqtrade.configuration.deprecated_settings import (check_conflicting_settings,
                                                          process_deprecated_setting,
@@ -584,67 +584,6 @@ def test_hyperopt_with_arguments(mocker, default_conf, caplog) -> None:
     assert config['runmode'] == RunMode.HYPEROPT
 
 
-def test_check_exchange(default_conf, caplog) -> None:
-    # Test an officially supported by Freqtrade team exchange
-    default_conf['runmode'] = RunMode.DRY_RUN
-    default_conf.get('exchange').update({'name': 'BITTREX'})
-    assert check_exchange(default_conf)
-    assert log_has_re(r"Exchange .* is officially supported by the Freqtrade development team\.",
-                      caplog)
-    caplog.clear()
-
-    # Test an officially supported by Freqtrade team exchange
-    default_conf.get('exchange').update({'name': 'binance'})
-    assert check_exchange(default_conf)
-    assert log_has_re(r"Exchange .* is officially supported by the Freqtrade development team\.",
-                      caplog)
-    caplog.clear()
-
-    # Test an available exchange, supported by ccxt
-    default_conf.get('exchange').update({'name': 'huobipro'})
-    assert check_exchange(default_conf)
-    assert log_has_re(r"Exchange .* is known to the the ccxt library, available for the bot, "
-                      r"but not officially supported "
-                      r"by the Freqtrade development team\. .*", caplog)
-    caplog.clear()
-
-    # Test a 'bad' exchange, which known to have serious problems
-    default_conf.get('exchange').update({'name': 'bitmex'})
-    with pytest.raises(OperationalException,
-                       match=r"Exchange .* will not work with Freqtrade\..*"):
-        check_exchange(default_conf)
-    caplog.clear()
-
-    # Test a 'bad' exchange with check_for_bad=False
-    default_conf.get('exchange').update({'name': 'bitmex'})
-    assert check_exchange(default_conf, False)
-    assert log_has_re(r"Exchange .* is known to the the ccxt library, available for the bot, "
-                      r"but not officially supported "
-                      r"by the Freqtrade development team\. .*", caplog)
-    caplog.clear()
-
-    # Test an invalid exchange
-    default_conf.get('exchange').update({'name': 'unknown_exchange'})
-    with pytest.raises(
-        OperationalException,
-        match=r'Exchange "unknown_exchange" is not known to the ccxt library '
-              r'and therefore not available for the bot.*'
-    ):
-        check_exchange(default_conf)
-
-    # Test no exchange...
-    default_conf.get('exchange').update({'name': ''})
-    default_conf['runmode'] = RunMode.PLOT
-    assert check_exchange(default_conf)
-
-    # Test no exchange...
-    default_conf.get('exchange').update({'name': ''})
-    default_conf['runmode'] = RunMode.UTIL_EXCHANGE
-    with pytest.raises(OperationalException,
-                       match=r'This command requires a configured exchange.*'):
-        check_exchange(default_conf)
-
-
 def test_cli_verbose_with_params(default_conf, mocker, caplog) -> None:
     patched_configuration_load_config_file(mocker, default_conf)
 
@@ -973,17 +912,17 @@ def test_validate_time_in_force(default_conf, caplog) -> None:
     conf = deepcopy(default_conf)
     conf['order_time_in_force'] = {
         'buy': 'gtc',
-        'sell': 'gtc',
+        'sell': 'GTC',
     }
     validate_config_consistency(conf)
     assert log_has_re(r"DEPRECATED: Using 'buy' and 'sell' for time_in_force is.*", caplog)
     assert conf['order_time_in_force']['entry'] == 'gtc'
-    assert conf['order_time_in_force']['exit'] == 'gtc'
+    assert conf['order_time_in_force']['exit'] == 'GTC'
 
     conf = deepcopy(default_conf)
     conf['order_time_in_force'] = {
-        'buy': 'gtc',
-        'sell': 'gtc',
+        'buy': 'GTC',
+        'sell': 'GTC',
     }
     conf['trading_mode'] = 'futures'
     with pytest.raises(OperationalException,
@@ -1087,6 +1026,83 @@ def test__validate_pricing_rules(default_conf, caplog) -> None:
             OperationalException,
             match=r"Please migrate your pricing settings to use the new wording\."):
         validate_config_consistency(conf)
+
+
+def test__validate_freqai_include_timeframes(default_conf, caplog) -> None:
+    conf = deepcopy(default_conf)
+    conf.update({
+            "freqai": {
+                "enabled": True,
+                "feature_parameters": {
+                    "include_timeframes": ["1m", "5m"],
+                    "include_corr_pairlist": [],
+                },
+                "data_split_parameters": {},
+                "model_training_parameters": {}
+            }
+    })
+    with pytest.raises(OperationalException, match=r"Main timeframe of .*"):
+        validate_config_consistency(conf)
+    # Validation pass
+    conf.update({'timeframe': '1m'})
+    validate_config_consistency(conf)
+    conf.update({'analyze_per_epoch': True})
+
+    with pytest.raises(OperationalException,
+                       match=r"Using analyze-per-epoch .* not supported with a FreqAI strategy."):
+        validate_config_consistency(conf)
+
+
+def test__validate_consumers(default_conf, caplog) -> None:
+    conf = deepcopy(default_conf)
+    conf.update({
+            "external_message_consumer": {
+                "enabled": True,
+                "producers": []
+                }
+            })
+    with pytest.raises(OperationalException,
+                       match="You must specify at least 1 Producer to connect to."):
+        validate_config_consistency(conf)
+
+    conf = deepcopy(default_conf)
+    conf.update({
+        "external_message_consumer": {
+            "enabled": True,
+            "producers": [
+                {
+                    "name": "default",
+                    "host": "127.0.0.1",
+                    "port": 8081,
+                    "ws_token": "secret_ws_t0ken."
+                }, {
+                    "name": "default",
+                    "host": "127.0.0.1",
+                    "port": 8080,
+                    "ws_token": "secret_ws_t0ken."
+                }
+            ]}
+        })
+    with pytest.raises(OperationalException,
+                       match="Producer names must be unique. Duplicate: default"):
+        validate_config_consistency(conf)
+
+    conf = deepcopy(default_conf)
+    conf.update({
+        "process_only_new_candles": True,
+        "external_message_consumer": {
+            "enabled": True,
+            "producers": [
+                {
+                    "name": "default",
+                    "host": "127.0.0.1",
+                    "port": 8081,
+                    "ws_token": "secret_ws_t0ken."
+                }
+            ]}
+        })
+    validate_config_consistency(conf)
+    assert log_has_re("To receive best performance with external data.*", caplog)
 
 
 def test_load_config_test_comments() -> None:
@@ -1522,3 +1538,85 @@ def test_flat_vars_to_nested_dict(caplog):
 
     assert log_has("Loading variable 'FREQTRADE__EXCHANGE__SOME_SETTING'", caplog)
     assert not log_has("Loading variable 'NOT_RELEVANT'", caplog)
+
+
+def test_setup_hyperopt_freqai(mocker, default_conf, caplog) -> None:
+    patched_configuration_load_config_file(mocker, default_conf)
+    mocker.patch(
+        'freqtrade.configuration.configuration.create_datadir',
+        lambda c, x: x
+    )
+    mocker.patch(
+        'freqtrade.configuration.configuration.create_userdata_dir',
+        lambda x, *args, **kwargs: Path(x)
+    )
+    arglist = [
+        'hyperopt',
+        '--config', 'config.json',
+        '--strategy', CURRENT_TEST_STRATEGY,
+        '--timerange', '20220801-20220805',
+        "--freqaimodel",
+        "LightGBMRegressorMultiTarget",
+        "--analyze-per-epoch"
+    ]
+
+    args = Arguments(arglist).get_parsed_arg()
+
+    configuration = Configuration(args)
+    config = configuration.get_config()
+    config['freqai'] = {
+        "enabled": True
+    }
+    with pytest.raises(
+        OperationalException, match=r".*analyze-per-epoch parameter is not supported.*"
+    ):
+        validate_config_consistency(config)
+
+
+def test_setup_freqai_backtesting(mocker, default_conf, caplog) -> None:
+    patched_configuration_load_config_file(mocker, default_conf)
+    mocker.patch(
+        'freqtrade.configuration.configuration.create_datadir',
+        lambda c, x: x
+    )
+    mocker.patch(
+        'freqtrade.configuration.configuration.create_userdata_dir',
+        lambda x, *args, **kwargs: Path(x)
+    )
+    arglist = [
+        'backtesting',
+        '--config', 'config.json',
+        '--strategy', CURRENT_TEST_STRATEGY,
+        '--timerange', '20220801-20220805',
+        "--freqaimodel",
+        "LightGBMRegressorMultiTarget",
+        "--freqai-backtest-live-models"
+    ]
+
+    args = Arguments(arglist).get_parsed_arg()
+
+    configuration = Configuration(args)
+    config = configuration.get_config()
+    config['runmode'] = RunMode.BACKTEST
+
+    with pytest.raises(
+        OperationalException, match=r".*--freqai-backtest-live-models parameter is only.*"
+    ):
+        validate_config_consistency(config)
+
+    conf = deepcopy(config)
+    conf['freqai'] = {
+        "enabled": True
+    }
+    with pytest.raises(
+        OperationalException, match=r".* timerange parameter is not supported with .*"
+    ):
+        validate_config_consistency(conf)
+
+    conf['timerange'] = None
+    conf['freqai_backtest_live_models'] = False
+
+    with pytest.raises(
+        OperationalException, match=r".* pass --timerange if you intend to use FreqAI .*"
+    ):
+        validate_config_consistency(conf)
